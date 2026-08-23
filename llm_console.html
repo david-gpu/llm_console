@@ -38,6 +38,7 @@
     extraParams:     {}
   };
 
+  /* Inlined raw SVG string for empty state splash screen */
   const ROBOT_SVG = `<svg width="180" height="180" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg" fill="#2BE060" stroke="#2BE060">
     <rect x="40" y="10" width="20" height="10" />
     <rect x="120" y="10" width="20" height="10" />
@@ -60,14 +61,11 @@
   function loadConfig() {
     try {
       const raw = localStorage.getItem(CONFIG_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        return Object.assign({}, DEFAULT_CONFIG, parsed);
-      }
+      return raw ? Object.assign({}, DEFAULT_CONFIG, JSON.parse(raw)) : null;
     } catch (e) {
       console.warn('Failed to load config:', e);
+      return null;
     }
-    return null;
   }
 
   function saveConfig(config) {
@@ -87,16 +85,14 @@
     if (!value || typeof value !== 'string') return;
     const val = value.trim();
     if (!val) return;
-    let list = getHistory(key);
-    list = list.filter(item => item !== val);
+    let list = getHistory(key).filter(item => item !== val);
     list.unshift(val);
     if (list.length > 25) list = list.slice(0, 25);
     localStorage.setItem(HISTORY_PREFIX + key, JSON.stringify(list));
   }
 
   function removeHistoryValue(key, value) {
-    let list = getHistory(key);
-    list = list.filter(item => item !== value);
+    let list = getHistory(key).filter(item => item !== value);
     localStorage.setItem(HISTORY_PREFIX + key, JSON.stringify(list));
   }
 
@@ -111,13 +107,15 @@
     try {
       let host = urlStr.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
       let parts = host.split('.');
-      if (parts.length >= 2) {
-        return parts[parts.length - 2];
-      }
-      return host;
+      return parts.length >= 2 ? parts[parts.length - 2] : host;
     } catch (e) {
       return urlStr;
     }
+  }
+
+  /* Helper to render inline SVG icon uses referencing the symbol sprite sheet */
+  function useIcon(id, w = 16, h = 16) {
+    return `<svg width="${w}" height="${h}"><use href="#icon-${id}"/></svg>`;
   }
 </script>
 <style>
@@ -134,7 +132,7 @@
    * 
    * TYPOGRAPHY & SIZING:
    * Single unified monospace typeface (--font-term) across standard text, inputs, 
-   * headers, and code blocks. Base text size set to 20px.
+   * headers, and code blocks. Base text size set to 19px.
    * ==========================================================================
    */
 
@@ -153,7 +151,9 @@
     --font-size-base:   19px;
   }
 
-  * { box-sizing: border-box; }
+  * {
+    box-sizing: border-box;
+  }
 
   html, body {
     height: 100%;
@@ -167,7 +167,7 @@
     overflow: hidden;
   }
 
-  /* FULL-SCREEN CRT OVERLAY (SCANLINES, SUBPIXELS, SOFTENED VIGNETTE) */
+  /* FULL-SCREEN 1980s CRT OVERLAY (SCANLINES, SUBPIXELS, VIGNETTE) */
   .crt-overlay {
     position: fixed;
     inset: 0;
@@ -190,7 +190,7 @@
         rgba(0, 0, 255, 0.03) 2px,
         transparent 3px
       ),
-      /* 3. Outer Edge Vignette (Toned Down) */
+      /* 3. Outer Edge Vignette */
       radial-gradient(
         circle at center,
         transparent 75%,
@@ -208,15 +208,15 @@
     animation: content-crt-fadeout 4s ease-in-out forwards;
   }
 
-  /* TIMED CRT FADE ANIMATIONS: FULL STRENGTH (0-2s) -> MODERN UI (4s) */
+  /* TIMED CRT WARMUP/STABILIZATION ANIMATIONS (FULL CRT 0-2s -> MODERN Phosphor 4s) */
   @keyframes overlay-crt-fadeout {
     0%, 50% {
       opacity: 1;
       visibility: visible;
     }
     100% {
-      opacity: 0;
-      visibility: hidden;
+      opacity: 0.35;
+      visibility: visible;
     }
   }
 
@@ -227,7 +227,7 @@
     }
     100% {
       filter: blur(0px) contrast(1) brightness(1);
-      text-shadow: none;
+      text-shadow: 0 0 1px rgba(43, 224, 96, 0.3);
     }
   }
 
@@ -237,9 +237,18 @@
     font-size: var(--font-size-base) !important; 
   }
 
-  .amber-txt { color: var(--amber-phosphor) !important; }
-  .green-txt { color: var(--green-phosphor) !important; }
-  .red-txt   { color: var(--red-phosphor) !important; text-align: left !important; }
+  .amber-txt { 
+    color: var(--amber-phosphor) !important; 
+  }
+
+  .green-txt { 
+    color: var(--green-phosphor) !important; 
+  }
+
+  .red-txt { 
+    color: var(--red-phosphor) !important; 
+    text-align: left !important; 
+  }
 
   /* SPARSE TOP BAR */
   .statusbar {
@@ -269,6 +278,7 @@
     flex: 0 1 auto;
   }
 
+  /* MAIN CONVERSATION CONTAINER */
   .conversation-wrap {
     flex: 1 1 auto;
     overflow-y: auto;
@@ -308,6 +318,7 @@
     letter-spacing: 0.12em;
   }
 
+  /* MESSAGE TAXONOMY STYLING */
   .message {
     max-width: 100%;
     word-wrap: break-word;
@@ -439,7 +450,7 @@
     will-change: transform;
   }
 
-  /* GPU-TRANSFORM ONLY HIDE TO PREVENT FLEX-LAYOUT CONTAINER RESIZING */
+  /* GPU-TRANSFORM ONLY HIDE TO PREVENT FLEX CONTAINER RESIZING SHIFTS */
   .inputbar.hidden {
     transform: translateY(100%);
     pointer-events: none;
@@ -492,7 +503,9 @@
   }
 
   .attach-btn,
-  .gear-btn {
+  .gear-btn,
+  button.send,
+  button.send-img {
     width: 40px;
     height: 40px;
     padding: 0;
@@ -508,39 +521,18 @@
     transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
 
-  .attach-btn:hover,
-  .gear-btn:hover {
-    background: var(--amber-phosphor);
-    color: var(--bg);
-  }
-
   button.send,
   button.send-img {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--panel);
-    border: 2px solid var(--amber-phosphor);
-    color: var(--amber-phosphor);
-    border-radius: 2px;
-    font-family: var(--font-term);
+    border-width: 2px;
     font-weight: bold;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
 
-  button.send svg,
-  button.send-img svg {
-    stroke-width: 2.8px;
-  }
-
+  .attach-btn:hover,
+  .gear-btn:hover,
   button.send:not(:disabled):hover,
   button.send-img:not(:disabled):hover {
-    color: var(--bg);
     background: var(--amber-phosphor);
+    color: var(--bg);
   }
 
   button.send:disabled,
@@ -588,7 +580,9 @@
     justify-content: center;
   }
 
-  .remove-attachment-btn:hover { color: var(--red-phosphor); }
+  .remove-attachment-btn:hover {
+    color: var(--red-phosphor);
+  }
 
   .img-thumbnail {
     max-height: 240px;
@@ -793,7 +787,9 @@
     padding: 2px 6px;
   }
 
-  .history-item:hover .history-item-del { color: var(--red-phosphor); }
+  .history-item:hover .history-item-del {
+    color: var(--red-phosphor);
+  }
 
   .settings-footer {
     flex: 0 0 auto;
@@ -957,10 +953,28 @@
 </head>
 <body>
 
-  <!-- FULLSCREEN SCANLINE & SUBPIXEL OVERLAY -->
+  <!-- SVG SYMBOL SPRITE SHEET (Prevents repetitive HTML parsing overhead during dynamic rendering) -->
+  <svg style="display:none;">
+    <symbol id="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.8"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></symbol>
+    <symbol id="icon-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"></rect></symbol>
+    <symbol id="icon-attach" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></symbol>
+    <symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></symbol>
+    <symbol id="icon-retry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></symbol>
+    <symbol id="icon-chevronDown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></symbol>
+    <symbol id="icon-chevronUp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></symbol>
+  </svg>
+
+  <!-- CRT OVERLAY -->
   <div class="crt-overlay"></div>
 
-  <!-- SCREEN CONTENT WRAPPER -->
+  <!-- MAIN CONSOLE SCREEN -->
   <div class="crt-screen-content">
     <div class="statusbar term-font green-txt" id="statusbar">
       <span id="statusHost"></span>
@@ -969,45 +983,135 @@
 
     <div class="conversation-wrap" id="conversationWrap"></div>
 
-    <div class="settings-screen" id="settingsScreen" style="display:none;"></div>
+    <!-- STATIC DECLARATIVE SETTINGS SCREEN (Avoids thrashing DOM innerHTML recreation on every modal toggle) -->
+    <div class="settings-screen" id="settingsScreen" style="display:none;">
+      <div class="settings-form term-font">
+        <div class="settings-header">SYSTEM CONFIGURATION</div>
+        <div class="settings-body">
+          <div class="field">
+            <label for="field-apiKey">API Key</label>
+            <input type="password" id="field-apiKey" class="term-font" placeholder="your API key">
+          </div>
+          <div class="field">
+            <label for="field-apiHost">API Host</label>
+            <div class="field-history-wrap">
+              <input type="text" id="field-apiHost" class="term-font" placeholder="https://api.deepinfra.com">
+              <button type="button" class="history-toggle-btn" data-key="apiHost" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
+              <div class="history-dropdown" id="history-dropdown-apiHost" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="field-apiPath">API Path</label>
+            <div class="field-history-wrap">
+              <input type="text" id="field-apiPath" class="term-font" placeholder="v1/openai/chat/completions">
+              <button type="button" class="history-toggle-btn" data-key="apiPath" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
+              <div class="history-dropdown" id="history-dropdown-apiPath" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="field-tavilyApiKey">Tavily API Key</label>
+            <input type="password" id="field-tavilyApiKey" class="term-font" placeholder="tvly-...">
+          </div>
+          <div class="field">
+            <label for="field-maxTavilyCalls">Max Tavily calls</label>
+            <input type="number" id="field-maxTavilyCalls" class="term-font" placeholder="3">
+          </div>
+          <div class="field">
+            <label for="field-model">Default Model</label>
+            <div class="field-history-wrap">
+              <input type="text" id="field-model" class="term-font" placeholder="deepseek-ai/DeepSeek-V4-Pro-0813">
+              <button type="button" class="history-toggle-btn" data-key="model" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
+              <div class="history-dropdown" id="history-dropdown-model" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="field-visionModel">Vision Model</label>
+            <div class="field-history-wrap">
+              <input type="text" id="field-visionModel" class="term-font" placeholder="Qwen/Qwen3-VL-30B-A3B-Instruct">
+              <button type="button" class="history-toggle-btn" data-key="visionModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
+              <div class="history-dropdown" id="history-dropdown-visionModel" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="field-imageModel">Image Model</label>
+            <div class="field-history-wrap">
+              <input type="text" id="field-imageModel" class="term-font" placeholder="black-forest-labs/FLUX-2-klein-9b">
+              <button type="button" class="history-toggle-btn" data-key="imageModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
+              <div class="history-dropdown" id="history-dropdown-imageModel" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="field-reasoningEffort">Reasoning Effort</label>
+            <select id="field-reasoningEffort" class="setting-select term-font">
+              <option value="none">none</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="field-imageResolution">Image Resolution</label>
+            <select id="field-imageResolution" class="setting-select term-font">
+              <option value="640x352">360p (640x352)</option>
+              <option value="854x480">480p (854x480)</option>
+              <option value="1280x720">720p (1280x720)</option>
+              <option value="1920x1080">1080p (1920x1080)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="field-imageQuality">Image Quality</label>
+            <select id="field-imageQuality" class="setting-select term-font">
+              <option value="standard">standard</option>
+              <option value="hd">hd</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="field-imageStyle">Image Style</label>
+            <select id="field-imageStyle" class="setting-select term-font">
+              <option value="natural">natural</option>
+              <option value="vivid">vivid</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="field-systemPrompt">System Prompt</label>
+            <textarea id="field-systemPrompt" class="term-font" placeholder="You are a helpful assistant." rows="4"></textarea>
+          </div>
+        </div>
+        <div class="settings-footer">
+          <button class="primary" id="saveSettingsBtn">[ SAVE ]</button>
+          <button class="secondary" id="cancelSettingsBtn" style="display:none;">[ CANCEL ]</button>
+        </div>
+      </div>
+    </div>
 
+    <!-- MAIN INPUT BAR CONTROL PANEL -->
     <div class="inputbar" id="inputbar">
       <div class="inputbar-main">
         <span class="prompt-prefix">&gt;</span>
         <textarea id="promptInput" class="term-font" placeholder="type a prompt…" rows="1" autofocus></textarea>
       </div>
       <div class="action-stack">
-        <button class="send" id="sendBtn" title="Send text" aria-label="Send text">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-        </button>
-        <button class="send-img" id="sendImgBtn" title="Generate image" aria-label="Generate image">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-        </button>
-        <button class="attach-btn" id="attachBtn" title="Attach file" aria-label="Attach file">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-        </button>
-        <button class="gear-btn" id="gearBtn" title="Settings" aria-label="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
-        </button>
+        <button class="send" id="sendBtn" title="Send text" aria-label="Send text"><svg width="16" height="16"><use href="#icon-send"/></svg></button>
+        <button class="send-img" id="sendImgBtn" title="Generate image" aria-label="Generate image"><svg width="16" height="16"><use href="#icon-image"/></svg></button>
+        <button class="attach-btn" id="attachBtn" title="Attach file" aria-label="Attach file"><svg width="16" height="16"><use href="#icon-attach"/></svg></button>
+        <button class="gear-btn" id="gearBtn" title="Settings" aria-label="Settings"><svg width="16" height="16"><use href="#icon-gear"/></svg></button>
       </div>
     </div>
   </div>
 
   <input type="file" id="fileInput" multiple style="display:none;" />
-
   <div class="error-container term-font" id="errorContainer"></div>
 
+  <!-- LIGHTBOX CONTAINER FOR FULLSCREEN IMAGE ZOOM -->
   <div id="lightbox" class="lightbox-overlay" style="display:none;">
-    <span class="lightbox-close" id="lightboxClose">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-    </span>
+    <span class="lightbox-close" id="lightboxClose"><svg width="28" height="28"><use href="#icon-close"/></svg></span>
     <img id="lightboxImg" class="lightbox-img" src="" alt="Fullscreen View" />
   </div>
 
 <script>
+  /* DOM ELEMENT REFERENCES */
   const conversationWrap = document.getElementById('conversationWrap');
   const promptInput = document.getElementById('promptInput');
   const sendBtn = document.getElementById('sendBtn');
@@ -1024,6 +1128,7 @@
   const lightboxImg = document.getElementById('lightboxImg');
   const lightboxClose = document.getElementById('lightboxClose');
 
+  /* APP STATE */
   let CONFIG = null;
   let conversationHistory = [];
   let abortController = null;
@@ -1036,210 +1141,170 @@
   let scrollSpacer = null;
   const expandedCodeBlocksState = new Map();
 
-  const SVG_ICONS = {
-    send: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`,
-    image: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`,
-    stop: `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>`,
-    edit: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`,
-    copy: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
-    download: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`,
-    retry: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>`,
-    chevronDown: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
-    chevronUp: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`,
-    file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`,
-    close: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`,
-    trash: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`
-  };
-
-  // ==== EMPTY STATE SPLASH MANAGEMENT ====
-
-  function renderEmptySplash() {
-    if (document.getElementById('emptySplash')) return;
-    const splashDiv = document.createElement('div');
-    splashDiv.id = 'emptySplash';
-    splashDiv.className = 'empty-splash term-font';
-    splashDiv.innerHTML = `${ROBOT_SVG}<div class="splash-title">READY FOR INPUT</div>`;
-    conversationWrap.appendChild(splashDiv);
+  /**
+   * Centralized HTTP Fetch wrapper.
+   * Handles host cleaning, endpoint formatting, signal association, and auth headers
+   * to remove repetitive network code across text streaming and image generation.
+   */
+  async function apiFetch(path, bodyData) {
+    const url = CONFIG.apiHost.replace(/\/$/, '') + '/' + path.replace(/^\//, '');
+    abortController = new AbortController();
+    return await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + CONFIG.apiKey
+      },
+      body: JSON.stringify(bodyData),
+      signal: abortController.signal
+    });
   }
 
-  function removeEmptySplash() {
-    const splash = document.getElementById('emptySplash');
-    if (splash) splash.remove();
-  }
-
+  /**
+   * Renders or removes the empty ASCII splash state based on message count.
+   */
   function checkEmptyState() {
+    let splash = document.getElementById('emptySplash');
     if (conversationHistory.length === 0) {
-      renderEmptySplash();
-    } else {
-      removeEmptySplash();
+      if (!splash) {
+        splash = document.createElement('div');
+        splash.id = 'emptySplash';
+        splash.className = 'empty-splash term-font';
+        splash.innerHTML = `${ROBOT_SVG}<div class="splash-title">READY FOR INPUT</div>`;
+        conversationWrap.appendChild(splash);
+      }
+    } else if (splash) {
+      splash.remove();
     }
   }
 
-  // ==== LIGHTBOX PINCH-TO-ZOOM ====
+  /* 
+   * ==========================================================================
+   * LIGHTBOX PINCH-TO-ZOOM / PAN CONTROLLER
+   * Handles multi-touch pinch calculations and single-finger pan when zoomed.
+   * ==========================================================================
+   */
+  let scale = 1, startDist = 0, initialScale = 1, translateX = 0, translateY = 0, startX = 0, startY = 0;
 
-  let scale = 1;
-  let startDist = 0;
-  let initialScale = 1;
-  let translateX = 0;
-  let translateY = 0;
-  let startX = 0;
-  let startY = 0;
-
-  function resetZoom() {
-    scale = 1;
-    translateX = 0;
-    translateY = 0;
-    startDist = 0;
-    initialScale = 1;
-    updateTransform();
+  function resetZoom() { 
+    scale = 1; translateX = 0; translateY = 0; startDist = 0; initialScale = 1; 
+    updateTransform(); 
   }
 
-  function updateTransform() {
-    lightboxImg.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+  function updateTransform() { 
+    lightboxImg.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`; 
   }
 
-  function getTouchDistance(touches) {
-    return Math.hypot(
-      touches[0].clientX - touches[1].clientX,
-      touches[0].clientY - touches[1].clientY
-    );
+  function getTouchDistance(t) { 
+    return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); 
   }
 
   lightboxImg.addEventListener('touchstart', (e) => {
-    if (e.touches.length === 2) {
-      startDist = getTouchDistance(e.touches);
-      initialScale = scale;
-    } else if (e.touches.length === 1 && scale > 1) {
-      startX = e.touches[0].clientX - translateX;
-      startY = e.touches[0].clientY - translateY;
+    if (e.touches.length === 2) { 
+      startDist = getTouchDistance(e.touches); 
+      initialScale = scale; 
+    } else if (e.touches.length === 1 && scale > 1) { 
+      startX = e.touches[0].clientX - translateX; 
+      startY = e.touches[0].clientY - translateY; 
     }
   }, { passive: true });
 
   lightboxImg.addEventListener('touchmove', (e) => {
-    if (e.touches.length === 2) {
-      const currentDist = getTouchDistance(e.touches);
-      if (startDist > 0) {
-        scale = Math.min(Math.max(1, initialScale * (currentDist / startDist)), 4);
-        updateTransform();
-      }
+    if (e.touches.length === 2 && startDist > 0) {
+      scale = Math.min(Math.max(1, initialScale * (getTouchDistance(e.touches) / startDist)), 4);
+      updateTransform();
     } else if (e.touches.length === 1 && scale > 1) {
-      translateX = e.touches[0].clientX - startX;
+      translateX = e.touches[0].clientX - startX; 
       translateY = e.touches[0].clientY - startY;
       updateTransform();
     }
   }, { passive: true });
 
-  lightboxImg.addEventListener('touchend', (e) => {
-    if (e.touches.length < 2) {
-      startDist = 0;
-    }
+  lightboxImg.addEventListener('touchend', (e) => { 
+    if (e.touches.length < 2) startDist = 0; 
   });
 
-  function openLightbox(src) {
-    lightboxImg.src = src;
-    lightbox.style.display = 'flex';
-    resetZoom();
+  function openLightbox(src) { 
+    lightboxImg.src = src; 
+    lightbox.style.display = 'flex'; 
+    resetZoom(); 
   }
 
-  function closeLightbox() {
-    lightbox.style.display = 'none';
-    lightboxImg.src = '';
-    resetZoom();
+  function closeLightbox() { 
+    lightbox.style.display = 'none'; 
+    lightboxImg.src = ''; 
+    resetZoom(); 
   }
 
   lightboxClose.addEventListener('click', closeLightbox);
-  lightbox.addEventListener('click', (e) => {
-    if (e.target === lightbox || e.target === lightboxClose) {
-      closeLightbox();
-    }
+  lightbox.addEventListener('click', (e) => { 
+    if (e.target === lightbox || e.target === lightboxClose) closeLightbox(); 
   });
 
-  // ==== RUNTIME CONTEXT ====
-
+  /**
+   * Generates timestamp suffix for system prompts to anchor temporal awareness.
+   */
   function getFormattedRuntimeContext() {
     const now = new Date();
-    if (now.getMinutes() >= 30) {
-      now.setHours(now.getHours() + 1);
-    }
+    if (now.getMinutes() >= 30) now.setHours(now.getHours() + 1);
     now.setMinutes(0, 0, 0);
-
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
-
-    const hours = String(now.getHours()).padStart(2, '0');
-    const timeStr = `${hours}:00`;
-
-    return `\n\n[Runtime Context]\nDate: ${dateStr}\nTime: ~${timeStr}`;
+    return `\n\n[Runtime Context]\nDate: ${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}\nTime: ~${String(now.getHours()).padStart(2,'0')}:00`;
   }
 
-  // ==== TAVILY SERVICE INTEGRATION ====
-
+  /* 
+   * ==========================================================================
+   * TAVILY SERVICE INTEGRATION
+   * Directly queries live web data or page contents when called by function-calling.
+   * ==========================================================================
+   */
   async function executeTavilySearch(query) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + CONFIG.tavilyApiKey
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
       body: JSON.stringify({ query: query, max_results: 5, search_depth: 'basic' })
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      throw new Error((err && err.detail) || res.statusText || 'Search failed');
-    }
-    const data = await res.json();
-    return JSON.stringify(data.results || []);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Search failed');
+    return JSON.stringify((await res.json()).results || []);
   }
 
   async function executeTavilyExtract(urls) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
-    const urlList = Array.isArray(urls) ? urls : [urls];
     const res = await fetch('https://api.tavily.com/extract', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + CONFIG.tavilyApiKey
-      },
-      body: JSON.stringify({ urls: urlList })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
+      body: JSON.stringify({ urls: Array.isArray(urls) ? urls : [urls] })
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      throw new Error((err && err.detail) || res.statusText || 'Extraction failed');
-    }
-    const data = await res.json();
-    return JSON.stringify(data.results || []);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Extraction failed');
+    return JSON.stringify((await res.json()).results || []);
   }
 
-  // ==== MODE LOCKING ====
-
+  /**
+   * Mode Lock: Prevents mixing chat stream mode and image generation mode in a single timeline.
+   */
   function lockConversationMode(mode) {
     if (!conversationMode) {
       conversationMode = mode;
-      if (mode === 'chat') {
-        sendImgBtn.disabled = true;
-      } else if (mode === 'image') {
-        sendBtn.disabled = true;
-        attachBtn.disabled = true;
-      }
+      sendImgBtn.disabled = (mode === 'chat');
+      sendBtn.disabled = (mode === 'image');
+      attachBtn.disabled = (mode === 'image');
     }
   }
 
-  // ==== HELPER & SANITIZATION FUNCTIONS ====
-
-  let renderScheduled = false;
-  let pendingRenderData = null;
+  /* 
+   * ==========================================================================
+   * MARKDOWN RENDERING & CODE BLOCK ENHANCEMENT
+   * Uses requestAnimationFrame to throttle markdown parsing on fast SSE streams.
+   * ==========================================================================
+   */
+  let renderScheduled = false, pendingRenderData = null;
 
   function renderMarkdownThrottled(container, text) {
     pendingRenderData = { container, text };
     if (!renderScheduled) {
       renderScheduled = true;
       requestAnimationFrame(() => {
-        if (pendingRenderData) {
-          renderMarkdown(pendingRenderData.container, pendingRenderData.text);
-        }
+        if (pendingRenderData) renderMarkdown(pendingRenderData.container, pendingRenderData.text);
         renderScheduled = false;
       });
     }
@@ -1247,156 +1312,76 @@
 
   function renderMarkdown(container, text) {
     container.classList.remove('placeholder');
-    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-      container.innerHTML = DOMPurify.sanitize(marked.parse(text));
-    } else if (typeof marked !== 'undefined') {
-      container.innerHTML = marked.parse(text);
-    } else {
-      container.textContent = text;
-    }
+    container.innerHTML = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
+      ? DOMPurify.sanitize(marked.parse(text))
+      : escapeHtml(text);
     enhanceCodeBlocks(container);
   }
 
+  /**
+   * Queries the configured fast LLM model to dynamically generate a clean filename
+   * for code download buttons.
+   */
   async function generateLLMFilename(codeText) {
     if (!CONFIG || !CONFIG.apiKey) return 'snippet.txt';
-
-    const snippetSample = codeText.slice(0, 1024);
-    const url = CONFIG.apiHost.replace(/\/$/, '') + '/' + CONFIG.apiPath.replace(/^\//, '');
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + CONFIG.apiKey
-        },
-        body: JSON.stringify({
-          model: CONFIG.model,
-          messages: [
-            {
-              role: 'user',
-              content: `Generate a clean, descriptive filename for the following code snippet. Output ONLY 1 to 7 lowercase words separated by underscores with a matching file extension (e.g., process_data.py, main_component.jsx, schema.sql). Do not output markdown, quotes, or explanations:\n\n${snippetSample}`
-            }
-          ],
-          reasoning_effort: 'none',
-          service_tier: 'priority',
-          temperature: 0.1,
-          max_tokens: 25,
-          stream: false
-        }),
-        signal: controller.signal
+      const res = await apiFetch(CONFIG.apiPath, {
+        model: CONFIG.model,
+        messages: [{ role: 'user', content: `Generate a clean filename for code snippet. Output ONLY 1-7 lowercase words with extension:\n\n${codeText.slice(0, 1024)}` }],
+        reasoning_effort: 'none', temperature: 0.1, max_tokens: 25, stream: false
       });
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) throw new Error('Failed filename generation response');
-      const data = await res.json();
-      let filename = data?.choices?.[0]?.message?.content?.trim() || '';
-      filename = filename.replace(/[`"'\s]/g, '').toLowerCase();
-
-      if (!filename || !filename.includes('.')) {
-        return 'snippet.txt';
-      }
-      return filename;
-    } catch (err) {
-      clearTimeout(timeoutId);
-      console.warn('LLM filename generation fallback:', err);
-      return 'snippet.txt';
+      if (!res.ok) return 'snippet.txt';
+      let fn = ((await res.json())?.choices?.[0]?.message?.content || '').trim().replace(/[`"'\s]/g, '').toLowerCase();
+      return fn.includes('.') ? fn : 'snippet.txt';
+    } catch (e) { 
+      return 'snippet.txt'; 
     }
   }
 
-  // ==== CONTEXT MENU & EPHEMERAL DOWNLOAD NOTIFICATION ====
-
+  /* CODE CONTEXT MENU CONTROLLER */
   let activeContextMenu = null;
-
-  function dismissContextMenu() {
-    if (activeContextMenu) {
-      activeContextMenu.remove();
-      activeContextMenu = null;
-    }
+  function dismissContextMenu() { 
+    if (activeContextMenu) { 
+      activeContextMenu.remove(); 
+      activeContextMenu = null; 
+    } 
   }
 
   document.addEventListener('click', (e) => {
-    if (activeContextMenu && !activeContextMenu.contains(e.target)) {
-      dismissContextMenu();
-    }
-
-    if (!e.target.closest('.field-history-wrap')) {
-      document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
-    }
+    if (activeContextMenu && !activeContextMenu.contains(e.target)) dismissContextMenu();
+    if (!e.target.closest('.field-history-wrap')) document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
   });
 
   function showCodeContextMenu(x, y, codeText) {
     dismissContextMenu();
-
     const menu = document.createElement('div');
     menu.className = 'code-context-menu';
+    menu.style.left = `${Math.min(x, window.innerWidth - 94)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - 54)}px`;
 
-    const menuWidth = 84;
-    const menuHeight = 44;
-    const posX = Math.min(x, window.innerWidth - menuWidth - 10);
-    const posY = Math.min(y, window.innerHeight - menuHeight - 10);
-
-    menu.style.left = `${posX}px`;
-    menu.style.top = `${posY}px`;
-
-    const copyBtn = document.createElement('button');
-    copyBtn.innerHTML = SVG_ICONS.copy;
-    copyBtn.title = 'Copy Code';
-    copyBtn.setAttribute('aria-label', 'Copy Code');
-    copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(codeText);
-      } catch (err) {
-        console.error('Failed to copy code:', err);
-      }
-      dismissContextMenu();
-    });
-
-    const downloadBtn = document.createElement('button');
-    downloadBtn.innerHTML = SVG_ICONS.download;
-    downloadBtn.title = 'Download Code';
-    downloadBtn.setAttribute('aria-label', 'Download Code');
-    downloadBtn.addEventListener('click', async () => {
-      copyBtn.style.display = 'none';
-      downloadBtn.style.display = 'none';
-
-      const filename = await generateLLMFilename(codeText);
-      const blob = new Blob([codeText], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-
-      const toast = document.createElement('span');
-      toast.className = 'green-txt term-font';
-      toast.style.padding = '4px 8px';
-      toast.style.fontSize = '0.85em';
-      toast.style.whiteSpace = 'nowrap';
-      toast.textContent = `-- Downloaded ${filename} --`;
-      menu.appendChild(toast);
-
-      setTimeout(() => {
-        dismissContextMenu();
-      }, 2000);
-    });
-
-    menu.appendChild(copyBtn);
-    menu.appendChild(downloadBtn);
+    menu.innerHTML = `<button id="ctxCopy" title="Copy Code">${useIcon('copy')}</button><button id="ctxDl" title="Download Code">${useIcon('download')}</button>`;
     document.body.appendChild(menu);
     activeContextMenu = menu;
+
+    menu.querySelector('#ctxCopy').onclick = async () => {
+      try { await navigator.clipboard.writeText(codeText); } catch(e){}
+      dismissContextMenu();
+    };
+    menu.querySelector('#ctxDl').onclick = async () => {
+      menu.innerHTML = `<span class="green-txt term-font" style="padding:4px 8px;font-size:0.85em;">-- Downloading --</span>`;
+      const filename = await generateLLMFilename(codeText);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([codeText], { type: 'text/plain' }));
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setTimeout(dismissContextMenu, 1500);
+    };
   }
 
   function enhanceCodeBlocks(container) {
-    const preElements = container.querySelectorAll('pre');
-    preElements.forEach((pre) => {
-      const codeEl = pre.querySelector('code');
-      const codeText = codeEl ? codeEl.textContent : pre.textContent;
+    container.querySelectorAll('pre').forEach((pre) => {
+      const codeText = pre.querySelector('code')?.textContent || pre.textContent;
       const snippetKey = codeText.slice(0, 120);
 
       let wrapper = pre.parentElement;
@@ -1407,60 +1392,32 @@
         wrapper.appendChild(pre);
       }
 
-      const lineCount = codeText.split('\n').length;
-      if (lineCount > 10) {
+      if (codeText.split('\n').length > 10) {
         const isExpanded = expandedCodeBlocksState.get(snippetKey) === true;
-        
-        if (isExpanded) {
-          wrapper.classList.remove('collapsed');
-        } else {
-          wrapper.classList.add('collapsed');
-        }
+        wrapper.classList.toggle('collapsed', !isExpanded);
 
-        let expandBar = wrapper.querySelector('.code-expand-bar');
-        if (!expandBar) {
-          expandBar = document.createElement('div');
-          expandBar.className = 'code-expand-bar';
-          wrapper.appendChild(expandBar);
-        }
-
-        expandBar.innerHTML = isExpanded 
-          ? `${SVG_ICONS.chevronUp} COLLAPSE`
-          : `${SVG_ICONS.chevronDown} EXPAND`;
+        let expandBar = wrapper.querySelector('.code-expand-bar') || document.createElement('div');
+        expandBar.className = 'code-expand-bar';
+        expandBar.innerHTML = isExpanded ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
+        if (!expandBar.parentElement) wrapper.appendChild(expandBar);
 
         expandBar.onclick = (e) => {
           e.stopPropagation();
           const collapsed = wrapper.classList.toggle('collapsed');
-          const nowExpanded = !collapsed;
-          expandedCodeBlocksState.set(snippetKey, nowExpanded);
-          expandBar.innerHTML = nowExpanded 
-            ? `${SVG_ICONS.chevronUp} COLLAPSE`
-            : `${SVG_ICONS.chevronDown} EXPAND`;
+          expandedCodeBlocksState.set(snippetKey, !collapsed);
+          expandBar.innerHTML = !collapsed ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
         };
       }
 
       if (!wrapper.dataset.gesturesBound) {
         wrapper.dataset.gesturesBound = 'true';
-        let touchStartX = 0;
-        let touchStartY = 0;
-
-        wrapper.addEventListener('pointerdown', (e) => {
-          if (e.target.closest('.code-expand-bar')) return;
-          touchStartX = e.clientX;
-          touchStartY = e.clientY;
+        let startX = 0, startY = 0;
+        wrapper.addEventListener('pointerdown', (e) => { 
+          if (!e.target.closest('.code-expand-bar')) { startX = e.clientX; startY = e.clientY; } 
         });
-
         wrapper.addEventListener('pointerup', (e) => {
-          if (e.target.closest('.code-expand-bar')) return;
-
-          const dist = Math.hypot(e.clientX - touchStartX, e.clientY - touchStartY);
-          if (dist > 8) return;
-
-          const selection = window.getSelection();
-          if (selection && selection.toString().trim().length > 0) return;
-
-          e.stopPropagation();
-          showCodeContextMenu(e.clientX, e.clientY, codeText);
+          if (e.target.closest('.code-expand-bar') || Math.hypot(e.clientX - startX, e.clientY - startY) > 8) return;
+          if (!window.getSelection()?.toString().trim()) { e.stopPropagation(); showCodeContextMenu(e.clientX, e.clientY, codeText); }
         });
       }
     });
@@ -1468,220 +1425,66 @@
 
   function setError(container, message) {
     container.classList.remove('placeholder');
-    const errDiv = document.createElement('div');
-    errDiv.className = 'error-msg-text';
-    errDiv.textContent = '< ERROR: ' + message + ' >';
-    container.appendChild(errDiv);
+    container.innerHTML += `<div class="error-msg-text">&lt; ERROR: ${escapeHtml(message)} &gt;</div>`;
   }
 
   function finalizeStoppedResponse(container, text) {
-    pendingRenderData = null; // CANCEL PENDING ANIMATION FRAME RENDERS
+    pendingRenderData = null;
     container.classList.remove('placeholder');
-    if (text) {
-      renderMarkdown(container, text);
-    } else {
-      container.textContent = '';
-    }
-    const stopMsg = document.createElement('div');
-    stopMsg.className = 'error-msg-text';
-    stopMsg.textContent = '< EXECUTION ABORTED BY USER >';
-    container.appendChild(stopMsg);
+    if (text) renderMarkdown(container, text); else container.textContent = '';
+    container.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
   }
 
-  function showError(message, context = 'inline') {
-    if (context === 'alert') {
-      alert(message);
-    } else {
-      errorContainer.textContent = '< SYS_ERR: ' + message + ' >';
-      errorContainer.style.display = 'block';
-      clearTimeout(errorContainer._hideTimeout);
-      errorContainer._hideTimeout = setTimeout(() => {
-        errorContainer.style.display = 'none';
-      }, 5000);
-    }
-  }
-
-  function hideError() {
-    errorContainer.style.display = 'none';
+  function showError(message) {
+    errorContainer.textContent = '< SYS_ERR: ' + message + ' >';
+    errorContainer.style.display = 'block';
     clearTimeout(errorContainer._hideTimeout);
+    errorContainer._hideTimeout = setTimeout(() => { errorContainer.style.display = 'none'; }, 5000);
   }
 
-  // ==== FULL-SCREEN CONFIG SCREEN ====
-
-  function renderHistoryComboField(f, val) {
-    let html = '<div class="field-history-wrap">';
-    html += '<input type="text" id="field-' + f.key + '" class="term-font" placeholder="' + escapeHtml(f.placeholder) + '" value="' + escapeHtml(val) + '">';
-    html += '<button type="button" class="history-toggle-btn" id="history-btn-' + f.key + '" title="View saved history">' + SVG_ICONS.chevronDown + '</button>';
-    html += '<div class="history-dropdown" id="history-dropdown-' + f.key + '" style="display:none;"></div>';
-    html += '</div>';
-    return html;
-  }
-
+  /* 
+   * ==========================================================================
+   * STATIC DECLARATIVE SETTINGS CONTROLLER
+   * Reads from / writes to HTML static inputs instead of constructing innerHTML.
+   * ==========================================================================
+   */
   function populateHistoryDropdown(key) {
     const dropdown = document.getElementById('history-dropdown-' + key);
     const input = document.getElementById('field-' + key);
-    if (!dropdown || !input) return;
-
     const list = getHistory(key);
+
     if (list.length === 0) {
       dropdown.innerHTML = '<div class="history-item amber-txt" style="cursor:default; opacity:0.6;">< NO SAVED HISTORY ></div>';
       return;
     }
 
-    let html = '';
-    for (const item of list) {
-      html += '<div class="history-item amber-txt" data-val="' + escapeHtml(item) + '">';
-      html += '<span class="history-item-text term-font">' + escapeHtml(item) + '</span>';
-      html += '<button type="button" class="history-item-del" title="Delete entry">' + SVG_ICONS.trash + '</button>';
-      html += '</div>';
-    }
-    dropdown.innerHTML = html;
+    dropdown.innerHTML = list.map(item => `<div class="history-item amber-txt" data-val="${escapeHtml(item)}"><span class="history-item-text term-font">${escapeHtml(item)}</span><button type="button" class="history-item-del" title="Delete entry">${useIcon('trash', 13, 13)}</button></div>`).join('');
 
     dropdown.querySelectorAll('.history-item').forEach(el => {
-      el.addEventListener('click', (e) => {
-        const delBtn = e.target.closest('.history-item-del');
+      el.onclick = (e) => {
         const itemVal = el.getAttribute('data-val');
-        if (delBtn) {
-          e.stopPropagation();
-          removeHistoryValue(key, itemVal);
-          populateHistoryDropdown(key);
+        if (e.target.closest('.history-item-del')) {
+          e.stopPropagation(); removeHistoryValue(key, itemVal); populateHistoryDropdown(key);
         } else {
-          input.value = itemVal;
-          dropdown.style.display = 'none';
+          input.value = itemVal; dropdown.style.display = 'none';
         }
-      });
+      };
     });
   }
 
-  function renderSettingsScreen() {
+  function loadSettingsIntoForm() {
     const cfg = CONFIG || DEFAULT_CONFIG;
-
-    const fields = [
-      { key: 'apiKey',          label: 'API Key',                  type: 'password',  placeholder: 'your API key' },
-      { key: 'apiHost',         label: 'API Host',                 type: 'combo',     placeholder: 'https://api.deepinfra.com' },
-      { key: 'apiPath',         label: 'API Path',                 type: 'combo',     placeholder: 'v1/openai/chat/completions' },
-      { key: 'tavilyApiKey',    label: 'Tavily API Key',           type: 'password',  placeholder: 'tvly-...' },
-      { key: 'maxTavilyCalls',  label: 'Max Tavily calls',         type: 'number',    placeholder: '3' },
-      { key: 'model',           label: 'Default Model',            type: 'combo',     placeholder: 'deepseek-ai/DeepSeek-V4-Pro-0813' },
-      { key: 'visionModel',     label: 'Vision Model',             type: 'combo',     placeholder: 'Qwen/Qwen3-VL-30B-A3B-Instruct' },
-      { key: 'imageModel',      label: 'Image Model',              type: 'combo',     placeholder: 'black-forest-labs/FLUX-2-klein-9b' },
-      {
-        key: 'reasoningEffort',
-        label: 'Reasoning Effort',
-        type: 'select',
-        options: [
-          { value: 'none', label: 'none' },
-          { value: 'low', label: 'low' },
-          { value: 'medium', label: 'medium' },
-          { value: 'high', label: 'high' },
-          { value: 'xhigh', label: 'xhigh' },
-          { value: 'max', label: 'max' }
-        ]
-      },
-      {
-        key: 'imageResolution',
-        label: 'Image Resolution',
-        type: 'select',
-        options: [
-          { value: '640x352', label: '360p (640x352)' },
-          { value: '854x480', label: '480p (854x480)' },
-          { value: '1280x720', label: '720p (1280x720)' },
-          { value: '1920x1080', label: '1080p (1920x1080)' }
-        ]
-      },
-      {
-        key: 'imageQuality',
-        label: 'Image Quality',
-        type: 'select',
-        options: [
-          { value: 'standard', label: 'standard' },
-          { value: 'hd', label: 'hd' }
-        ]
-      },
-      {
-        key: 'imageStyle',
-        label: 'Image Style',
-        type: 'select',
-        options: [
-          { value: 'natural', label: 'natural' },
-          { value: 'vivid', label: 'vivid' }
-        ]
-      },
-      { key: 'systemPrompt',    label: 'System Prompt',            type: 'textarea',  placeholder: 'You are a helpful assistant.' }
-    ];
-
-    let html = '<div class="settings-form term-font">';
-    html += '<div class="settings-header">SYSTEM CONFIGURATION</div>';
-    html += '<div class="settings-body">';
-
-    for (const f of fields) {
-      const val = cfg[f.key] !== undefined ? cfg[f.key] : (f.type === 'select' ? f.options[0].value : '');
-      html += '<div class="field">';
-      html += '<label for="field-' + f.key + '">' + f.label + '</label>';
-      if (f.type === 'select') {
-        html += '<select id="field-' + f.key + '" class="setting-select term-font">';
-        for (const opt of f.options) {
-          const selected = val === opt.value ? ' selected' : '';
-          html += '<option value="' + opt.value + '"' + selected + '>' + escapeHtml(opt.label) + '</option>';
-        }
-        html += '</select>';
-      } else if (f.type === 'textarea') {
-        html += '<textarea id="field-' + f.key + '" class="term-font" placeholder="' + escapeHtml(f.placeholder) + '" rows="4">' + escapeHtml(val) + '</textarea>';
-      } else if (f.type === 'combo') {
-        html += renderHistoryComboField(f, val);
-      } else {
-        html += '<input type="' + f.type + '" id="field-' + f.key + '" class="term-font" placeholder="' + escapeHtml(f.placeholder) + '" value="' + escapeHtml(val) + '">';
-      }
-      html += '</div>';
-    }
-
-    html += '</div>';
-    html += '<div class="settings-footer">';
-    html += '<button class="primary" id="saveSettingsBtn">[ SAVE ]</button>';
-    if (CONFIG) {
-      html += '<button class="secondary" id="cancelSettingsBtn">[ CANCEL ]</button>';
-    }
-    html += '</div>';
-    html += '</div>';
-
-    settingsScreen.innerHTML = html;
-
-    fields.filter(f => f.type === 'combo').forEach(f => {
-      const toggleBtn = document.getElementById('history-btn-' + f.key);
-      const dropdown = document.getElementById('history-dropdown-' + f.key);
-      if (toggleBtn && dropdown) {
-        toggleBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const isOpen = dropdown.style.display === 'block';
-          document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
-          if (!isOpen) {
-            populateHistoryDropdown(f.key);
-            dropdown.style.display = 'block';
-          }
-        });
-      }
+    Object.keys(DEFAULT_CONFIG).forEach(key => {
+      const field = document.getElementById('field-' + key);
+      if (field) field.value = cfg[key] !== undefined ? cfg[key] : '';
     });
-
-    const apiKeyField = document.getElementById('field-apiKey');
-    if (apiKeyField && !apiKeyField.value) {
-      apiKeyField.focus();
-    }
-
-    document.getElementById('saveSettingsBtn').addEventListener('click', saveSettingsFromForm);
-    const cancelBtn = document.getElementById('cancelSettingsBtn');
-    if (cancelBtn) {
-      cancelBtn.addEventListener('click', hideSettingsScreen);
-    }
+    document.getElementById('cancelSettingsBtn').style.display = CONFIG ? 'inline-block' : 'none';
   }
 
   function saveSettingsFromForm() {
-    const comboFields = ['apiHost', 'apiPath', 'model', 'visionModel', 'imageModel'];
-
-    comboFields.forEach(k => {
-      const input = document.getElementById('field-' + k);
-      if (input && input.value) {
-        addHistoryValue(k, input.value);
-      }
+    ['apiHost', 'apiPath', 'model', 'visionModel', 'imageModel'].forEach(k => {
+      const val = document.getElementById('field-' + k)?.value;
+      if (val) addHistoryValue(k, val);
     });
 
     const newConfig = {
@@ -1702,82 +1505,55 @@
     };
 
     if (!newConfig.apiKey || !newConfig.apiHost || !newConfig.apiPath || !newConfig.model) {
-      showError('Please fill in all required fields.', 'alert');
+      showError('Please fill in all required fields.'); 
       return;
     }
 
     CONFIG = newConfig;
     saveConfig(CONFIG);
-    hideSettingsScreen();
-    updateStatusBar();
-    hideError();
-  }
-
-  function showSettingsScreen() {
-    renderSettingsScreen();
-    settingsScreen.style.display = 'flex';
-  }
-
-  function hideSettingsScreen() {
     settingsScreen.style.display = 'none';
+    updateStatusBar();
     promptInput.focus();
   }
 
-  gearBtn.addEventListener('click', () => {
-    showSettingsScreen();
+  document.querySelectorAll('.history-toggle-btn').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const key = btn.getAttribute('data-key');
+      const dropdown = document.getElementById('history-dropdown-' + key);
+      const isOpen = dropdown.style.display === 'block';
+      document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
+      if (!isOpen) { populateHistoryDropdown(key); dropdown.style.display = 'block'; }
+    };
   });
 
-  // ==== STATUS BAR ====
+  document.getElementById('saveSettingsBtn').onclick = saveSettingsFromForm;
+  document.getElementById('cancelSettingsBtn').onclick = () => { settingsScreen.style.display = 'none'; promptInput.focus(); };
+  gearBtn.onclick = () => { loadSettingsIntoForm(); settingsScreen.style.display = 'flex'; };
 
   function updateStatusBar(activeModel = null) {
-    if (!CONFIG) {
-      statusHost.textContent = 'NOT CONFIGURED';
-      statusModel.textContent = '';
-      return;
-    }
-    const targetModel = activeModel || CONFIG.model;
+    if (!CONFIG) { statusHost.textContent = 'NOT CONFIGURED'; statusModel.textContent = ''; return; }
     statusHost.textContent = extractDomainName(CONFIG.apiHost);
-    statusModel.textContent = targetModel.split('/').pop();
+    statusModel.textContent = (activeModel || CONFIG.model).split('/').pop();
   }
 
-  // ==== FILE ATTACHMENT ====
-
-  attachBtn.addEventListener('click', () => {
-    if (conversationMode === 'image') return;
-    fileInput.click();
-  });
-
-  fileInput.addEventListener('change', (e) => {
+  /* FILE ATTACHMENTS */
+  attachBtn.onclick = () => { if (conversationMode !== 'image') fileInput.click(); };
+  fileInput.onchange = (e) => {
     attachedFiles = attachedFiles.concat(Array.from(e.target.files));
     updateAttachmentPreview();
     fileInput.value = '';
-  });
+  };
 
   function updateAttachmentPreview() {
     document.querySelectorAll('.attachment-preview').forEach(el => el.remove());
     attachedFiles.forEach((file, index) => {
       const preview = document.createElement('span');
       preview.className = 'attachment-preview term-font';
-      
-      const fileText = document.createElement('span');
-      fileText.style.display = 'inline-flex';
-      fileText.style.alignItems = 'center';
-      fileText.style.gap = '4px';
-      fileText.innerHTML = `${SVG_ICONS.file} ${escapeHtml(file.name)} (${formatFileSize(file.size)})`;
-      preview.appendChild(fileText);
-
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'remove-attachment-btn';
-      removeBtn.innerHTML = SVG_ICONS.close;
-      removeBtn.title = 'Remove attachment';
-      removeBtn.ariaLabel = 'Remove attachment';
-      removeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        attachedFiles.splice(index, 1);
-        updateAttachmentPreview();
-      });
-      preview.appendChild(removeBtn);
-
+      preview.innerHTML = `<span>${useIcon('file', 14, 14)} ${escapeHtml(file.name)} (${formatFileSize(file.size)})</span><button type="button" class="remove-attachment-btn" title="Remove attachment">${useIcon('close', 12, 12)}</button>`;
+      preview.querySelector('.remove-attachment-btn').onclick = (e) => { 
+        e.stopPropagation(); attachedFiles.splice(index, 1); updateAttachmentPreview(); 
+      };
       inputbar.insertBefore(preview, inputbar.firstChild);
     });
   }
@@ -1788,54 +1564,27 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  async function readFileAsText(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsText(file);
-    });
-  }
-
-  async function readFileAsDataURL(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
-
   async function buildMultimodalContent(promptText, files) {
-    const contentParts = [];
-
-    if (promptText) {
-      contentParts.push({ type: 'text', text: promptText });
-    }
-
+    const parts = promptText ? [{ type: 'text', text: promptText }] : [];
     for (const file of files) {
       if (file.type.startsWith('image/')) {
-        const dataUrl = await readFileAsDataURL(file);
-        contentParts.push({
-          type: 'image_url',
-          image_url: { url: dataUrl }
-        });
+        const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+        parts.push({ type: 'image_url', image_url: { url: dataUrl } });
       } else {
-        const textContent = await readFileAsText(file);
-        contentParts.push({
-          type: 'text',
-          text: `\n=== FILE: ${file.name} ===\n${textContent}\n=== END FILE ===`
-        });
+        const txt = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(file); });
+        parts.push({ type: 'text', text: `\n=== FILE: ${file.name} ===\n${txt}\n=== END FILE ===` });
       }
     }
-
-    return contentParts.length === 1 && contentParts[0].type === 'text'
-      ? contentParts[0].text
-      : contentParts;
+    return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
   }
 
-  // ==== CHAT & SCROLL BEHAVIOR ====
-
+  /* 
+   * ==========================================================================
+   * SCROLLING, SPACER & KEYBOARD DISMISSAL LOGIC
+   * Uses precise offset deltas and temporary height spacers to anchor the 
+   * assistant element flush against the status bar upon execution.
+   * ==========================================================================
+   */
   function autoGrow() {
     promptInput.style.height = 'auto';
     promptInput.style.height = Math.max(86, Math.min(promptInput.scrollHeight, 240)) + 'px';
@@ -1843,84 +1592,43 @@
   promptInput.addEventListener('input', autoGrow);
 
   let lastScrollTop = 0;
-  const scrollThreshold = 10;
-
   conversationWrap.addEventListener('scroll', () => {
     if (isAutoScrolling || isProcessing) return;
-
-    const currentScrollTop = conversationWrap.scrollTop;
-    const maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight;
-    const diff = currentScrollTop - lastScrollTop;
-
-    if (diff < -scrollThreshold && currentScrollTop > 20) {
-      inputbar.classList.add('hidden');
-    } else if (diff > scrollThreshold || currentScrollTop >= maxScroll - 20) {
-      inputbar.classList.remove('hidden');
-    }
-
-    lastScrollTop = Math.max(0, currentScrollTop);
+    const st = conversationWrap.scrollTop, maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight, diff = st - lastScrollTop;
+    if (diff < -10 && st > 20) inputbar.classList.add('hidden');
+    else if (diff > 10 || st >= maxScroll - 20) inputbar.classList.remove('hidden');
+    lastScrollTop = Math.max(0, st);
   });
 
   promptInput.addEventListener('focus', () => {
     inputbar.classList.remove('hidden');
-    setTimeout(() => {
-      promptInput.scrollIntoView({ block: 'end', behavior: 'smooth' });
-    }, 50);
+    setTimeout(() => promptInput.scrollIntoView({ block: 'end', behavior: 'smooth' }), 50);
   });
 
-  // ==== KEYBOARD-AWARE VIEWPORT HEIGHT ====
   function updateAppHeight() {
-    const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-    document.documentElement.style.setProperty('--app-height', vh + 'px');
+    document.documentElement.style.setProperty('--app-height', (window.visualViewport ? window.visualViewport.height : window.innerHeight) + 'px');
   }
-
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', updateAppHeight);
     window.visualViewport.addEventListener('scroll', updateAppHeight);
-  } else {
-    window.addEventListener('resize', updateAppHeight);
+  } else { 
+    window.addEventListener('resize', updateAppHeight); 
   }
   updateAppHeight();
 
-  // Polls until the visual viewport height stops changing across consecutive frames
+  /**
+   * Blurs active input element and waits for visualViewport resize events to settle.
+   */
   async function dismissKeyboard() {
-    if (document.activeElement) {
-      document.activeElement.blur();
-    }
+    if (document.activeElement) document.activeElement.blur();
     promptInput.blur();
-
-    if (window.visualViewport) {
-      let lastHeight = window.visualViewport.height;
-      let stableCount = 0;
-      const start = Date.now();
-
-      while (Date.now() - start < 800) {
-        await new Promise(r => requestAnimationFrame(r));
-        updateAppHeight();
-        const currentHeight = window.visualViewport.height;
-        if (Math.abs(currentHeight - lastHeight) < 1) {
-          stableCount++;
-          if (stableCount >= 5) break;
-        } else {
-          stableCount = 0;
-          lastHeight = currentHeight;
-        }
-      }
-    } else {
-      await new Promise(r => setTimeout(r, 350));
-    }
-
+    await new Promise(r => setTimeout(r, 150));
     updateAppHeight();
-    await new Promise(r => requestAnimationFrame(r));
     await new Promise(r => requestAnimationFrame(r));
   }
 
-  // ==== SCROLL-TO-TOP SPACER & ALIGNMENT ====
-  function removeScrollSpacer() {
-    if (scrollSpacer && scrollSpacer.parentElement === conversationWrap) {
-      scrollSpacer.remove();
-    }
-    scrollSpacer = null;
+  function removeScrollSpacer() { 
+    if (scrollSpacer) { scrollSpacer.remove(); scrollSpacer = null; } 
   }
 
   function addScrollSpacer() {
@@ -1929,393 +1637,200 @@
     scrollSpacer.className = 'scroll-spacer';
     scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
     conversationWrap.appendChild(scrollSpacer);
-    return scrollSpacer;
   }
 
+  /**
+   * Aligns the top coordinate of the target assistant element flush with the container top.
+   */
   function alignAssistantToTop(div) {
     if (!div || !div.parentElement) return;
-    if (scrollSpacer) {
-      scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
-    }
-    const containerTop = conversationWrap.getBoundingClientRect().top;
-    const targetTop = div.getBoundingClientRect().top;
-    const delta = targetTop - containerTop;
-    conversationWrap.scrollTop += delta;
+    if (scrollSpacer) scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
+    conversationWrap.scrollTop += (div.getBoundingClientRect().top - conversationWrap.getBoundingClientRect().top);
   }
 
   function scrollAssistantToTop(div) {
     if (!div) return;
     isAutoScrolling = true;
-
     requestAnimationFrame(() => {
       alignAssistantToTop(div);
-      requestAnimationFrame(() => {
-        alignAssistantToTop(div);
-        setTimeout(() => {
-          isAutoScrolling = false;
-        }, 100);
+      requestAnimationFrame(() => { 
+        alignAssistantToTop(div); 
+        setTimeout(() => { isAutoScrolling = false; }, 100); 
       });
     });
   }
 
   function createUserMessage(text) {
-    removeEmptySplash();
+    document.getElementById('emptySplash')?.remove();
     removeScrollSpacer();
     document.querySelectorAll('.edit-prompt-btn').forEach(btn => btn.remove());
 
     const div = document.createElement('div');
     div.className = 'message user term-font';
-    
-    const contentWrap = document.createElement('div');
-    contentWrap.className = 'user-content-wrap';
-
-    const prefixSpan = document.createElement('span');
-    prefixSpan.className = 'user-prompt-prefix amber-txt';
-    prefixSpan.textContent = '>';
-    contentWrap.appendChild(prefixSpan);
-
-    const textSpan = document.createElement('span');
-    textSpan.className = 'user-prompt-text amber-txt';
-    textSpan.textContent = text;
-    contentWrap.appendChild(textSpan);
-
-    const editBtn = document.createElement('button');
-    editBtn.className = 'edit-prompt-btn';
-    editBtn.title = 'Edit prompt';
-    editBtn.innerHTML = SVG_ICONS.edit;
-    editBtn.addEventListener('click', () => {
-      editLastPrompt(text, div);
-    });
-
-    div.appendChild(contentWrap);
-    div.appendChild(editBtn);
-
+    div.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(text)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
+    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(text, div);
     conversationWrap.appendChild(div);
   }
 
   function editLastPrompt(text, userMsgDiv) {
     if (isProcessing) return;
-
     const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
     const uIdx = allUserMsgs.indexOf(userMsgDiv);
 
-    let nextSibling = userMsgDiv.nextElementSibling;
-    while (nextSibling) {
-      const toRemove = nextSibling;
-      nextSibling = nextSibling.nextElementSibling;
-      toRemove.remove();
-    }
+    let next = userMsgDiv.nextElementSibling;
+    while (next) { const r = next; next = next.nextElementSibling; r.remove(); }
     userMsgDiv.remove();
 
-    if (uIdx !== -1) {
-      conversationHistory = conversationHistory.slice(0, uIdx * 2);
-    }
+    if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
 
     if (conversationHistory.length === 0) {
-      conversationMode = null;
-      lastGeneratedImageUrl = null;
-      attachedFiles = [];
-      updateAttachmentPreview();
-      sendBtn.disabled = false;
-      sendImgBtn.disabled = false;
-      attachBtn.disabled = false;
+      conversationMode = null; lastGeneratedImageUrl = null; attachedFiles = [];
+      updateAttachmentPreview(); sendBtn.disabled = false; sendImgBtn.disabled = false; attachBtn.disabled = false;
       checkEmptyState();
     }
 
-    promptInput.value = text;
-    autoGrow();
-    promptInput.focus();
-
-    const remainingUserMsgs = conversationWrap.querySelectorAll('.message.user');
-    if (remainingUserMsgs.length > 0) {
-      const lastUserMsg = remainingUserMsgs[remainingUserMsgs.length - 1];
-      if (!lastUserMsg.querySelector('.edit-prompt-btn')) {
-        const prevText = lastUserMsg.querySelector('.user-prompt-text')?.textContent || '';
-        const prevEditBtn = document.createElement('button');
-        prevEditBtn.className = 'edit-prompt-btn';
-        prevEditBtn.title = 'Edit prompt';
-        prevEditBtn.innerHTML = SVG_ICONS.edit;
-        prevEditBtn.addEventListener('click', () => {
-          editLastPrompt(prevText, lastUserMsg);
-        });
-        lastUserMsg.appendChild(prevEditBtn);
-      }
-    }
+    promptInput.value = text; autoGrow(); promptInput.focus();
   }
 
-  function createAssistantMessageContainer() {
+  function createAssistantContainer() {
     const div = document.createElement('div');
     div.className = 'message assistant term-font';
-    
-    const content = document.createElement('div');
-    content.className = 'response markdown-body placeholder green-txt term-font';
-    content.textContent = 'Thinking...';
-    
-    div.appendChild(content);
+    div.innerHTML = `<div class="response markdown-body placeholder green-txt term-font">Thinking...</div>`;
     conversationWrap.appendChild(div);
     addScrollSpacer();
     scrollAssistantToTop(div);
-    
-    return content;
+    return div.querySelector('.response');
   }
 
   function setLoading(btnToStop) {
-    const targetBtn = btnToStop || sendBtn;
-    targetBtn.disabled = false;
-    targetBtn.innerHTML = SVG_ICONS.stop;
-    targetBtn.title = 'Stop';
-    targetBtn.classList.add('stop');
-    promptInput.disabled = true;
+    const target = btnToStop || sendBtn;
+    target.disabled = false;
+    target.innerHTML = useIcon('stop', 14, 14);
+    target.classList.add('stop');
+    promptInput.disabled = true; 
     attachBtn.disabled = true;
   }
 
   function resetInput() {
-    sendBtn.innerHTML = SVG_ICONS.send;
-    sendBtn.title = 'Send text';
-    sendBtn.classList.remove('stop');
-
-    sendImgBtn.innerHTML = SVG_ICONS.image;
-    sendImgBtn.title = 'Generate image';
-    sendImgBtn.classList.remove('stop');
-
-    if (conversationMode === 'chat') {
-      sendBtn.disabled = false;
-      sendImgBtn.disabled = true;
-      attachBtn.disabled = false;
-    } else if (conversationMode === 'image') {
-      sendBtn.disabled = true;
-      sendImgBtn.disabled = false;
-      attachBtn.disabled = true;
-    } else {
-      sendBtn.disabled = false;
-      sendImgBtn.disabled = false;
-      attachBtn.disabled = false;
-    }
-
-    promptInput.disabled = false;
-    promptInput.value = '';
-    autoGrow();
+    sendBtn.innerHTML = useIcon('send', 16, 16); sendBtn.classList.remove('stop');
+    sendImgBtn.innerHTML = useIcon('image', 16, 16); sendImgBtn.classList.remove('stop');
+    sendBtn.disabled = (conversationMode === 'image');
+    sendImgBtn.disabled = (conversationMode === 'chat');
+    attachBtn.disabled = (conversationMode === 'image');
+    promptInput.disabled = false; promptInput.value = ''; autoGrow();
   }
 
-  function addRetryButton(container, retryFn) {
-    const existingRetry = container.parentElement.querySelector('.retry-btn');
-    if (existingRetry) existingRetry.remove();
-    
-    const retryBtn = document.createElement('button');
-    retryBtn.className = 'retry-btn term-font';
-    retryBtn.title = 'Retry';
-    retryBtn.innerHTML = SVG_ICONS.retry;
-    retryBtn.addEventListener('click', () => {
-      retryFn();
-    });
-    
-    container.parentElement.appendChild(retryBtn);
+  function addRetryButton(container) {
+    container.parentElement.querySelector('.retry-btn')?.remove();
+    const btn = document.createElement('button');
+    btn.className = 'retry-btn term-font';
+    btn.title = 'Retry';
+    btn.innerHTML = useIcon('retry', 14, 14);
+    btn.onclick = retryLastPrompt;
+    container.parentElement.appendChild(btn);
   }
 
   async function retryLastPrompt() {
     if (isProcessing || !lastPromptPayload) return;
-    
-    const failedContainer = lastPromptPayload.failedContainer;
-    if (failedContainer && failedContainer.parentElement) {
-      const assistantDiv = failedContainer.parentElement;
-      const userDiv = assistantDiv.previousElementSibling;
-      if (userDiv && userDiv.classList.contains('user')) {
-        userDiv.remove();
-      }
-      assistantDiv.remove();
+    const failed = lastPromptPayload.failedContainer?.parentElement;
+    if (failed) { 
+      failed.previousElementSibling?.classList.contains('user') && failed.previousElementSibling.remove(); 
+      failed.remove(); 
     }
 
-    if (conversationHistory.length > 0 && conversationHistory[conversationHistory.length - 1].role === 'assistant') {
+    while (conversationHistory.length > 0 && (conversationHistory[conversationHistory.length - 1].role === 'assistant' || conversationHistory[conversationHistory.length - 1].role === 'user')) {
       conversationHistory.pop();
     }
-    if (conversationHistory.length > 0 && conversationHistory[conversationHistory.length - 1].role === 'user') {
-      conversationHistory.pop();
-    }
-    
+
     await dismissKeyboard();
     createUserMessage(lastPromptPayload.displayPrompt);
-    const newContainer = createAssistantMessageContainer();
-    if (lastPromptPayload.isImage) {
-      await executeImageRequest(lastPromptPayload.displayPrompt, newContainer);
-    } else {
-      await sendPromptWithFullText(lastPromptPayload.fullPayload, lastPromptPayload.displayPrompt, newContainer);
-    }
+    const newEl = createAssistantContainer();
+    if (lastPromptPayload.isImage) executeImageRequest(lastPromptPayload.displayPrompt, newEl);
+    else executePromptRequest(lastPromptPayload.fullPayload, lastPromptPayload.displayPrompt, newEl);
   }
 
   async function sendPrompt() {
     if (isProcessing) return;
-    
     const prompt = promptInput.value.trim();
     if ((!prompt && attachedFiles.length === 0) || !CONFIG) return;
 
-    promptInput.value = '';
-    autoGrow();
-
-    lockConversationMode('chat');
-    isProcessing = true;
-
+    promptInput.value = ''; autoGrow(); lockConversationMode('chat'); isProcessing = true;
     try {
       const fullPayload = await buildMultimodalContent(prompt, attachedFiles);
       setLoading(sendBtn);
-
       await dismissKeyboard();
-
       const displayPrompt = prompt || '-- files attached --';
       createUserMessage(displayPrompt);
-      const contentEl = createAssistantMessageContainer();
-
-      await executePromptRequest(fullPayload, displayPrompt, contentEl);
-    } finally {
-      isProcessing = false;
+      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer());
+    } finally { 
+      isProcessing = false; 
     }
   }
 
-  async function sendPromptWithFullText(fullPayload, displayPrompt, contentEl) {
-    if (isProcessing) return;
-    isProcessing = true;
-    try {
-      setLoading(sendBtn);
-      await executePromptRequest(fullPayload, displayPrompt, contentEl);
-    } finally {
-      isProcessing = false;
-    }
-  }
-
+  /* 
+   * ==========================================================================
+   * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
+   * ==========================================================================
+   */
   async function executePromptRequest(fullPayload, displayPrompt, contentEl, existingApiMessages = null, toolRoundCount = 0) {
-    lastPromptPayload = {
-      isImage: false,
-      displayPrompt: displayPrompt,
-      fullPayload: fullPayload,
-      failedContainer: contentEl
-    };
-
-    const hasImage = Array.isArray(fullPayload) && fullPayload.some(item => item.type === 'image_url');
+    lastPromptPayload = { isImage: false, displayPrompt, fullPayload, failedContainer: contentEl };
+    const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i.type === 'image_url');
     const activeModel = (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
-
     updateStatusBar(activeModel);
 
-    let apiMessages;
-    if (existingApiMessages) {
-      apiMessages = existingApiMessages;
-    } else {
-      const contextSuffix = getFormattedRuntimeContext();
-
-      conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt: displayPrompt });
-      apiMessages = [
-        { role: 'system', content: CONFIG.systemPrompt + contextSuffix }
-      ];
+    let apiMessages = existingApiMessages;
+    if (!apiMessages) {
+      conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt });
+      apiMessages = [{ role: 'system', content: CONFIG.systemPrompt + getFormattedRuntimeContext() }];
       for (let i = 0; i < conversationHistory.length - 1; i++) {
         const item = conversationHistory[i];
-        apiMessages.push({
-          role: item.role,
-          content: item.content,
-          ...(item.tool_calls ? { tool_calls: item.tool_calls } : {})
-        });
+        apiMessages.push({ role: item.role, content: item.content, ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
       }
       apiMessages.push({ role: 'user', content: fullPayload });
     }
 
-    const url = CONFIG.apiHost.replace(/\/$/, '') + '/' + CONFIG.apiPath.replace(/^\//, '');
-    const body = Object.assign(
-      {
-        model: activeModel,
-        messages: apiMessages,
-        stream: true
-      },
+    const payload = Object.assign(
+      { model: activeModel, messages: apiMessages, stream: true },
       CONFIG.tavilyApiKey ? {
         tools: [
-          {
-            type: 'function',
-            function: {
-              name: 'web_search',
-              description: 'Search the live web for up-to-date information, news, or factual verification.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  query: { type: 'string', description: 'The search query' }
-                },
-                required: ['query']
-              }
-            }
-          },
-          {
-            type: 'function',
-            function: {
-              name: 'fetch_web_page',
-              description: 'Fetch and extract full text content from one or more web page URLs.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  urls: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: 'List of full HTTP/HTTPS URLs to fetch'
-                  }
-                },
-                required: ['urls']
-              }
-            }
-          }
+          { type: 'function', function: { name: 'web_search', description: 'Search web', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
+          { type: 'function', function: { name: 'fetch_web_page', description: 'Fetch page', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } } }
         ]
       } : {},
       (CONFIG.reasoningEffort && CONFIG.reasoningEffort !== 'none') ? { reasoning_effort: CONFIG.reasoningEffort } : {},
       CONFIG.extraParams
     );
 
-    let fullText = '';
-    let accumulatedToolCalls = {};
-    abortController = new AbortController();
-
+    let fullText = '', accumulatedToolCalls = {};
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + CONFIG.apiKey
-        },
-        body: JSON.stringify(body),
-        signal: abortController.signal
-      });
-
+      const res = await apiFetch(CONFIG.apiPath, payload);
       if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        const msg = (data && data.error && (data.error.message || data.error)) || res.statusText;
-        setError(contentEl, typeof msg === 'string' ? msg : JSON.stringify(msg));
-        addRetryButton(contentEl, retryLastPrompt);
-        if (!existingApiMessages) conversationHistory.pop();
-        showError(typeof msg === 'string' ? msg : JSON.stringify(msg));
-        resetInput();
-        return;
+        const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
+        setError(contentEl, err); addRetryButton(contentEl); if (!existingApiMessages) conversationHistory.pop();
+        showError(err); resetInput(); return;
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
+      const reader = res.body.getReader(), decoder = new TextDecoder();
       let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
-
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-
-          const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') continue;
-
+          if (!trimmed.startsWith('data:') || trimmed === 'data: [DONE]') continue;
           try {
-            const parsed = JSON.parse(data);
+            const parsed = JSON.parse(trimmed.slice(5).trim());
             const delta = parsed?.choices?.[0]?.delta;
             if (delta) {
               if (delta.content) {
-                if (!fullText) {
-                  contentEl.classList.remove('placeholder');
-                  alignAssistantToTop(contentEl.parentElement);
+                if (!fullText) { 
+                  contentEl.classList.remove('placeholder'); 
+                  alignAssistantToTop(contentEl.parentElement); 
                 }
                 fullText += delta.content;
                 renderMarkdownThrottled(contentEl, fullText);
@@ -2323,270 +1838,121 @@
               if (delta.tool_calls) {
                 for (const tc of delta.tool_calls) {
                   const idx = tc.index ?? 0;
-                  if (!accumulatedToolCalls[idx]) {
-                    accumulatedToolCalls[idx] = { id: '', name: '', arguments: '' };
-                  }
+                  if (!accumulatedToolCalls[idx]) accumulatedToolCalls[idx] = { id: '', name: '', arguments: '' };
                   if (tc.id) accumulatedToolCalls[idx].id = tc.id;
                   if (tc.function?.name) accumulatedToolCalls[idx].name += tc.function.name;
                   if (tc.function?.arguments) accumulatedToolCalls[idx].arguments += tc.function.arguments;
                 }
               }
             }
-          } catch (e) {
-            // Ignore invalid JSON frame
-          }
+          } catch (e) {}
         }
       }
 
       const toolCallList = Object.values(accumulatedToolCalls);
-
       if (toolCallList.length > 0) {
         const maxCalls = parseInt(CONFIG.maxTavilyCalls, 10) || 3;
         if (toolRoundCount >= maxCalls) {
           fullText += `\n\n-- MAX TAVILY CALLS REACHED (${maxCalls}). STOPPING TOOL LOOP --`;
-          renderMarkdown(contentEl, fullText);
-          addRetryButton(contentEl, retryLastPrompt);
-          conversationHistory.push({ role: 'assistant', content: fullText });
-          resetInput();
-          return;
+          renderMarkdown(contentEl, fullText); addRetryButton(contentEl);
+          conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return;
         }
 
-        const assistantMsg = {
-          role: 'assistant',
-          content: fullText || null,
-          tool_calls: toolCallList.map(tc => ({
-            id: tc.id,
-            type: 'function',
-            function: { name: tc.name, arguments: tc.arguments }
-          }))
-        };
-        apiMessages.push(assistantMsg);
+        apiMessages.push({ role: 'assistant', content: fullText || null, tool_calls: toolCallList.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments } })) });
 
         for (const tc of toolCallList) {
           let resultStr = '';
           try {
             const args = JSON.parse(tc.arguments || '{}');
             if (tc.name === 'web_search') {
-              const statusDiv = `<div class="tool-status-msg green-txt term-font">-- TOOL EXEC: SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`;
-              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + statusDiv);
+              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`);
               resultStr = await executeTavilySearch(args.query);
             } else if (tc.name === 'fetch_web_page') {
-              const statusDiv = `<div class="tool-status-msg green-txt term-font">-- TOOL EXEC: FETCHING WEB PAGE CONTENT... --</div>`;
-              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + statusDiv);
+              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- FETCHING WEB PAGE... --</div>`);
               resultStr = await executeTavilyExtract(args.urls);
-            } else {
-              resultStr = JSON.stringify({ error: `Unknown tool: ${tc.name}` });
             }
-          } catch (err) {
-            resultStr = JSON.stringify({ error: err.message || 'Tool execution failed' });
-          }
-
-          apiMessages.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: resultStr
-          });
+          } catch (err) { resultStr = JSON.stringify({ error: err.message }); }
+          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
         }
-
         return await executePromptRequest(fullPayload, displayPrompt, contentEl, apiMessages, toolRoundCount + 1);
       }
 
-      renderMarkdown(contentEl, fullText);
-      addRetryButton(contentEl, retryLastPrompt);
-
-      conversationHistory.push({ role: 'assistant', content: fullText });
-      resetInput();
+      renderMarkdown(contentEl, fullText); addRetryButton(contentEl);
+      conversationHistory.push({ role: 'assistant', content: fullText }); resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') {
-        finalizeStoppedResponse(contentEl, fullText);
-        addRetryButton(contentEl, retryLastPrompt);
-        if (fullText) {
-          conversationHistory.push({ role: 'assistant', content: fullText });
-        }
-        resetInput();
-        return;
-      }
-
-      const errorMessage = err.message || 'network request failed';
-      setError(contentEl, errorMessage);
-      addRetryButton(contentEl, retryLastPrompt);
-      showError(errorMessage);
-      if (!existingApiMessages) conversationHistory.pop();
-      resetInput();
-    } finally {
-      abortController = null;
+      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
+      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl); showError(err.message); if (!existingApiMessages) conversationHistory.pop(); resetInput();
+    } finally { 
+      abortController = null; 
     }
   }
 
-  // ==== IMAGE GENERATION ====
-
+  /* IMAGE GENERATION EXECUTION */
   async function sendImagePrompt() {
     if (isProcessing) return;
-
     const prompt = promptInput.value.trim();
     if (!prompt || !CONFIG) return;
 
-    promptInput.value = '';
-    autoGrow();
-
-    lockConversationMode('image');
-    isProcessing = true;
-
+    promptInput.value = ''; autoGrow(); lockConversationMode('image'); isProcessing = true;
     try {
-      setLoading(sendImgBtn);
-
-      await dismissKeyboard();
-
-      createUserMessage(prompt);
-      const contentEl = createAssistantMessageContainer();
-
-      await executeImageRequest(prompt, contentEl);
-    } finally {
-      isProcessing = false;
+      setLoading(sendImgBtn); await dismissKeyboard(); createUserMessage(prompt);
+      await executeImageRequest(prompt, createAssistantContainer());
+    } finally { 
+      isProcessing = false; 
     }
   }
 
   async function executeImageRequest(promptText, contentEl) {
-    lastPromptPayload = {
-      isImage: true,
-      displayPrompt: promptText,
-      failedContainer: contentEl
-    };
-
+    lastPromptPayload = { isImage: true, displayPrompt: promptText, failedContainer: contentEl };
     const targetModel = CONFIG.imageModel || 'black-forest-labs/FLUX-2-klein-9b';
     updateStatusBar(targetModel);
-
     conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText });
 
-    const url = CONFIG.apiHost.replace(/\/$/, '') + '/v1/openai/images/generations';
-    const payload = {
-      model: targetModel,
-      prompt: promptText,
-      size: CONFIG.imageResolution || '1280x720',
-      quality: CONFIG.imageQuality || 'standard',
-      style: CONFIG.imageStyle || 'natural'
-    };
-
-    if (lastGeneratedImageUrl) {
-      payload.image = lastGeneratedImageUrl;
-    }
-
-    abortController = new AbortController();
+    const payload = { model: targetModel, prompt: promptText, size: CONFIG.imageResolution || '1280x720', quality: CONFIG.imageQuality || 'standard', style: CONFIG.imageStyle || 'natural' };
+    if (lastGeneratedImageUrl) payload.image = lastGeneratedImageUrl;
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + CONFIG.apiKey
-        },
-        body: JSON.stringify(payload),
-        signal: abortController.signal
-      });
-
+      const res = await apiFetch('v1/openai/images/generations', payload);
       if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        const msg = (data && data.error && (data.error.message || data.error)) || res.statusText;
-        setError(contentEl, typeof msg === 'string' ? msg : JSON.stringify(msg));
-        addRetryButton(contentEl, retryLastPrompt);
-        conversationHistory.pop();
-        showError(typeof msg === 'string' ? msg : JSON.stringify(msg));
-        resetInput();
-        return;
+        const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
+        setError(contentEl, err); addRetryButton(contentEl); conversationHistory.pop(); showError(err); resetInput(); return;
       }
 
       const data = await res.json();
       const imageUrl = data?.data?.[0]?.url || (data?.data?.[0]?.b64_json ? `data:image/png;base64,${data.data[0].b64_json}` : null);
+      if (!imageUrl) throw new Error('No image returned');
 
-      if (!imageUrl) {
-        throw new Error('No image returned in response payload');
-      }
-
-      contentEl.classList.remove('placeholder');
-      contentEl.innerHTML = '';
-
+      contentEl.classList.remove('placeholder'); contentEl.innerHTML = '';
       const imgEl = document.createElement('img');
-      imgEl.src = imageUrl;
-      imgEl.className = 'img-thumbnail';
-      imgEl.alt = promptText;
-      imgEl.addEventListener('click', () => openLightbox(imageUrl));
-
-      contentEl.appendChild(imgEl);
-      addRetryButton(contentEl, retryLastPrompt);
+      imgEl.src = imageUrl; imgEl.className = 'img-thumbnail'; imgEl.alt = promptText;
+      imgEl.onclick = () => openLightbox(imageUrl);
+      contentEl.appendChild(imgEl); addRetryButton(contentEl);
 
       lastGeneratedImageUrl = imageUrl;
-      conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl });
-      resetInput();
+      conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl }); resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') {
-        finalizeStoppedResponse(contentEl, '');
-        addRetryButton(contentEl, retryLastPrompt);
-        resetInput();
-        return;
-      }
-
-      const errorMessage = err.message || 'Image generation failed';
-      setError(contentEl, errorMessage);
-      addRetryButton(contentEl, retryLastPrompt);
-      showError(errorMessage);
-      conversationHistory.pop();
-      resetInput();
-    } finally {
-      abortController = null;
+      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl); resetInput(); return; }
+      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl); showError(err.message); conversationHistory.pop(); resetInput();
+    } finally { 
+      abortController = null; 
     }
   }
 
-  function handleSendOrStop() {
-    if (sendBtn.classList.contains('stop')) {
-      if (abortController) abortController.abort();
-    } else if (!isProcessing) {
-      sendPrompt();
-    }
-  }
+  sendBtn.onclick = () => { if (sendBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendPrompt(); };
+  sendImgBtn.onclick = () => { if (sendImgBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendImagePrompt(); };
 
-  function handleImageSendOrStop() {
-    if (sendImgBtn.classList.contains('stop')) {
-      if (abortController) abortController.abort();
-    } else if (!isProcessing) {
-      sendImagePrompt();
-    }
-  }
-
-  sendBtn.addEventListener('click', handleSendOrStop);
-  sendImgBtn.addEventListener('click', handleImageSendOrStop);
-
-  // ==== INIT ====
-
-  let autoFocusArmed = true;
-  function disarmAutoFocus() {
-    autoFocusArmed = false;
-    document.removeEventListener('pointerdown', tryAutoFocus, true);
-    document.removeEventListener('touchstart', tryAutoFocus, true);
-  }
-  function tryAutoFocus(e) {
-    if (!autoFocusArmed) return;
-    disarmAutoFocus();
-    if (!CONFIG) return;
-    if (document.activeElement === promptInput) return;
-    if (e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
-    promptInput.focus();
-  }
-  document.addEventListener('pointerdown', tryAutoFocus, true);
-  document.addEventListener('touchstart', tryAutoFocus, true);
-
+  /* INITIALIZATION */
   const savedConfig = loadConfig();
-  if (savedConfig) {
-    CONFIG = savedConfig;
-    updateStatusBar();
-    hideSettingsScreen();
-  } else {
-    CONFIG = null;
-    updateStatusBar();
-    showSettingsScreen();
+  if (savedConfig) { 
+    CONFIG = savedConfig; 
+    updateStatusBar(); 
+  } else { 
+    CONFIG = null; 
+    updateStatusBar(); 
+    loadSettingsIntoForm(); 
+    settingsScreen.style.display = 'flex'; 
   }
-
   checkEmptyState();
 </script>
-
 </body>
 </html>
