@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, interactive-widget=resizes-content">
 <title>TERMINAL // LLM CONSOLE</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -203,7 +203,7 @@
   .crt-screen-content {
     display: flex;
     flex-direction: column;
-    height: 100dvh;
+    height: var(--app-height, 100dvh);
     width: 100%;
     animation: content-crt-fadeout 4s ease-in-out forwards;
   }
@@ -457,6 +457,8 @@
 
   textarea#promptInput {
     flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
     resize: vertical;
     background: var(--bg);
     color: var(--amber-phosphor);
@@ -1852,7 +1854,32 @@
 
   promptInput.addEventListener('focus', () => {
     inputbar.classList.remove('hidden');
+    // Give the keyboard a moment to open/the viewport to resize, then make
+    // sure the input bar is actually scrolled into the visible area.
+    setTimeout(() => {
+      promptInput.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    }, 50);
   });
+
+  // ==== KEYBOARD-AWARE VIEWPORT HEIGHT ====
+  // On Android, the on-screen keyboard shrinks the *visual* viewport but not
+  // always the *layout* viewport, so a container sized with 100dvh can end up
+  // taller than the visible area and the input bar hides behind the keyboard.
+  // The `interactive-widget=resizes-content` viewport meta tag fixes this on
+  // browsers that support it; this listener is a fallback (and belt-and-braces)
+  // for browsers that don't, by tracking window.visualViewport directly.
+  function updateAppHeight() {
+    const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    document.documentElement.style.setProperty('--app-height', vh + 'px');
+  }
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', updateAppHeight);
+    window.visualViewport.addEventListener('scroll', updateAppHeight);
+  } else {
+    window.addEventListener('resize', updateAppHeight);
+  }
+  updateAppHeight();
 
   function createUserMessage(text) {
     removeEmptySplash();
@@ -1963,6 +1990,12 @@
     attachBtn.disabled = true;
   }
 
+  function clearAndBlurInput() {
+    promptInput.value = '';
+    autoGrow();
+    promptInput.blur();
+  }
+
   function resetInput() {
     sendBtn.innerHTML = SVG_ICONS.send;
     sendBtn.title = 'Send text';
@@ -1989,7 +2022,6 @@
     promptInput.disabled = false;
     promptInput.value = '';
     autoGrow();
-    promptInput.focus();
   }
 
   function addRetryButton(container, retryFn) {
@@ -2041,6 +2073,8 @@
     
     const prompt = promptInput.value.trim();
     if ((!prompt && attachedFiles.length === 0) || !CONFIG) return;
+
+    clearAndBlurInput();
 
     lockConversationMode('chat');
     isProcessing = true;
@@ -2315,6 +2349,8 @@
     const prompt = promptInput.value.trim();
     if (!prompt || !CONFIG) return;
 
+    clearAndBlurInput();
+
     lockConversationMode('image');
     isProcessing = true;
 
@@ -2439,6 +2475,30 @@
   sendImgBtn.addEventListener('click', handleImageSendOrStop);
 
   // ==== INIT ====
+
+  // Most mobile browsers (Android Firefox included) refuse to raise the
+  // on-screen keyboard for a focus() call that isn't triggered by a direct
+  // user gesture — so autofocus/.focus() on page load moves the caret at
+  // best, but no keyboard appears. As a fallback, arm a one-shot listener
+  // that focuses the prompt input on the very first tap/click anywhere on
+  // the page (as long as that tap wasn't already on some other control),
+  // which *does* count as a gesture and reliably opens the keyboard.
+  let autoFocusArmed = true;
+  function disarmAutoFocus() {
+    autoFocusArmed = false;
+    document.removeEventListener('pointerdown', tryAutoFocus, true);
+    document.removeEventListener('touchstart', tryAutoFocus, true);
+  }
+  function tryAutoFocus(e) {
+    if (!autoFocusArmed) return;
+    disarmAutoFocus();
+    if (!CONFIG) return; // settings screen is showing; don't steal focus
+    if (document.activeElement === promptInput) return;
+    if (e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
+    promptInput.focus();
+  }
+  document.addEventListener('pointerdown', tryAutoFocus, true);
+  document.addEventListener('touchstart', tryAutoFocus, true);
 
   const savedConfig = loadConfig();
   if (savedConfig) {
