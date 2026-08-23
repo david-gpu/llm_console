@@ -278,6 +278,11 @@
     gap: 20px;
   }
 
+  .scroll-spacer {
+    flex: 0 0 auto;
+    pointer-events: none;
+  }
+
   /* EMPTY SPLASH STATE */
   .empty-splash {
     display: flex;
@@ -430,13 +435,13 @@
     align-items: flex-end;
     gap: 8px;
     flex-wrap: nowrap;
-    transition: transform 0.3s ease, margin-bottom 0.3s ease;
-    will-change: transform, margin-bottom;
+    transition: transform 0.3s ease;
+    will-change: transform;
   }
 
+  /* GPU-TRANSFORM ONLY HIDE TO PREVENT FLEX-LAYOUT CONTAINER RESIZING */
   .inputbar.hidden {
     transform: translateY(100%);
-    margin-bottom: -170px;
     pointer-events: none;
   }
 
@@ -1024,9 +1029,11 @@
   let abortController = null;
   let attachedFiles = [];
   let isProcessing = false;
+  let isAutoScrolling = false;
   let lastPromptPayload = null;
   let conversationMode = null;
   let lastGeneratedImageUrl = null;
+  let scrollSpacer = null;
   const expandedCodeBlocksState = new Map();
 
   const SVG_ICONS = {
@@ -1839,6 +1846,8 @@
   const scrollThreshold = 10;
 
   conversationWrap.addEventListener('scroll', () => {
+    if (isAutoScrolling || isProcessing) return;
+
     const currentScrollTop = conversationWrap.scrollTop;
     const maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight;
     const diff = currentScrollTop - lastScrollTop;
@@ -1854,20 +1863,12 @@
 
   promptInput.addEventListener('focus', () => {
     inputbar.classList.remove('hidden');
-    // Give the keyboard a moment to open/the viewport to resize, then make
-    // sure the input bar is actually scrolled into the visible area.
     setTimeout(() => {
       promptInput.scrollIntoView({ block: 'end', behavior: 'smooth' });
     }, 50);
   });
 
   // ==== KEYBOARD-AWARE VIEWPORT HEIGHT ====
-  // On Android, the on-screen keyboard shrinks the *visual* viewport but not
-  // always the *layout* viewport, so a container sized with 100dvh can end up
-  // taller than the visible area and the input bar hides behind the keyboard.
-  // The `interactive-widget=resizes-content` viewport meta tag fixes this on
-  // browsers that support it; this listener is a fallback (and belt-and-braces)
-  // for browsers that don't, by tracking window.visualViewport directly.
   function updateAppHeight() {
     const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
     document.documentElement.style.setProperty('--app-height', vh + 'px');
@@ -1881,8 +1882,85 @@
   }
   updateAppHeight();
 
+  // Polls until the visual viewport height stops changing across consecutive frames
+  async function dismissKeyboard() {
+    if (document.activeElement) {
+      document.activeElement.blur();
+    }
+    promptInput.blur();
+
+    if (window.visualViewport) {
+      let lastHeight = window.visualViewport.height;
+      let stableCount = 0;
+      const start = Date.now();
+
+      while (Date.now() - start < 800) {
+        await new Promise(r => requestAnimationFrame(r));
+        updateAppHeight();
+        const currentHeight = window.visualViewport.height;
+        if (Math.abs(currentHeight - lastHeight) < 1) {
+          stableCount++;
+          if (stableCount >= 5) break;
+        } else {
+          stableCount = 0;
+          lastHeight = currentHeight;
+        }
+      }
+    } else {
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    updateAppHeight();
+    await new Promise(r => requestAnimationFrame(r));
+    await new Promise(r => requestAnimationFrame(r));
+  }
+
+  // ==== SCROLL-TO-TOP SPACER & ALIGNMENT ====
+  function removeScrollSpacer() {
+    if (scrollSpacer && scrollSpacer.parentElement === conversationWrap) {
+      scrollSpacer.remove();
+    }
+    scrollSpacer = null;
+  }
+
+  function addScrollSpacer() {
+    removeScrollSpacer();
+    scrollSpacer = document.createElement('div');
+    scrollSpacer.className = 'scroll-spacer';
+    scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
+    conversationWrap.appendChild(scrollSpacer);
+    return scrollSpacer;
+  }
+
+  function alignAssistantToTop(div) {
+    if (!div || !div.parentElement) return;
+    if (scrollSpacer) {
+      scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
+    }
+    const containerTop = conversationWrap.getBoundingClientRect().top;
+    const targetTop = div.getBoundingClientRect().top;
+    const delta = targetTop - containerTop;
+    conversationWrap.scrollTop += delta;
+  }
+
+  function scrollAssistantToTop(div) {
+    if (!div) return;
+    isAutoScrolling = true;
+
+    requestAnimationFrame(() => {
+      alignAssistantToTop(div);
+      requestAnimationFrame(() => {
+        alignAssistantToTop(div);
+        setTimeout(() => {
+          isAutoScrolling = false;
+        }, 100);
+      });
+    });
+  }
+
   function createUserMessage(text) {
     removeEmptySplash();
+    removeScrollSpacer();
     document.querySelectorAll('.edit-prompt-btn').forEach(btn => btn.remove());
 
     const div = document.createElement('div');
@@ -1975,7 +2053,8 @@
     
     div.appendChild(content);
     conversationWrap.appendChild(div);
-    div.scrollIntoView({ block: 'start' });
+    addScrollSpacer();
+    scrollAssistantToTop(div);
     
     return content;
   }
@@ -1988,12 +2067,6 @@
     targetBtn.classList.add('stop');
     promptInput.disabled = true;
     attachBtn.disabled = true;
-  }
-
-  function clearAndBlurInput() {
-    promptInput.value = '';
-    autoGrow();
-    promptInput.blur();
   }
 
   function resetInput() {
@@ -2059,6 +2132,7 @@
       conversationHistory.pop();
     }
     
+    await dismissKeyboard();
     createUserMessage(lastPromptPayload.displayPrompt);
     const newContainer = createAssistantMessageContainer();
     if (lastPromptPayload.isImage) {
@@ -2074,16 +2148,18 @@
     const prompt = promptInput.value.trim();
     if ((!prompt && attachedFiles.length === 0) || !CONFIG) return;
 
-    clearAndBlurInput();
+    promptInput.value = '';
+    autoGrow();
 
     lockConversationMode('chat');
     isProcessing = true;
 
     try {
       const fullPayload = await buildMultimodalContent(prompt, attachedFiles);
-      
       setLoading(sendBtn);
-      
+
+      await dismissKeyboard();
+
       const displayPrompt = prompt || '-- files attached --';
       createUserMessage(displayPrompt);
       const contentEl = createAssistantMessageContainer();
@@ -2239,6 +2315,7 @@
               if (delta.content) {
                 if (!fullText) {
                   contentEl.classList.remove('placeholder');
+                  alignAssistantToTop(contentEl.parentElement);
                 }
                 fullText += delta.content;
                 renderMarkdownThrottled(contentEl, fullText);
@@ -2349,13 +2426,17 @@
     const prompt = promptInput.value.trim();
     if (!prompt || !CONFIG) return;
 
-    clearAndBlurInput();
+    promptInput.value = '';
+    autoGrow();
 
     lockConversationMode('image');
     isProcessing = true;
 
     try {
       setLoading(sendImgBtn);
+
+      await dismissKeyboard();
+
       createUserMessage(prompt);
       const contentEl = createAssistantMessageContainer();
 
@@ -2476,13 +2557,6 @@
 
   // ==== INIT ====
 
-  // Most mobile browsers (Android Firefox included) refuse to raise the
-  // on-screen keyboard for a focus() call that isn't triggered by a direct
-  // user gesture — so autofocus/.focus() on page load moves the caret at
-  // best, but no keyboard appears. As a fallback, arm a one-shot listener
-  // that focuses the prompt input on the very first tap/click anywhere on
-  // the page (as long as that tap wasn't already on some other control),
-  // which *does* count as a gesture and reliably opens the keyboard.
   let autoFocusArmed = true;
   function disarmAutoFocus() {
     autoFocusArmed = false;
@@ -2492,7 +2566,7 @@
   function tryAutoFocus(e) {
     if (!autoFocusArmed) return;
     disarmAutoFocus();
-    if (!CONFIG) return; // settings screen is showing; don't steal focus
+    if (!CONFIG) return;
     if (document.activeElement === promptInput) return;
     if (e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
     promptInput.focus();
