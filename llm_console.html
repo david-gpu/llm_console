@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, interactive-widget=resizes-content">
-<title>TERMINAL // LLM CONSOLE</title>
+<title>LLM CONSOLE</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
 <script>
@@ -150,7 +150,7 @@
     --red-phosphor:     #FF4A4A;
     
     --font-term:        "Courier New", Courier, "Liberation Mono", VT323, Consolas, monospace;
-    --font-size-base:   20px;
+    --font-size-base:   19px;
   }
 
   * { box-sizing: border-box; }
@@ -671,8 +671,8 @@
     flex: 0 0 auto;
     padding: 10px 14px;
     background: var(--panel);
-    border-bottom: 1px solid var(--green-phosphor);
-    color: var(--green-phosphor);
+    border-bottom: 1px solid var(--amber-phosphor);
+    color: var(--amber-phosphor);
     font-size: var(--font-size-base);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -697,7 +697,7 @@
     font-size: 0.75em;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
   }
 
   .settings-body input,
@@ -705,7 +705,7 @@
   .settings-body textarea {
     width: 100%;
     background: var(--bg);
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
     border: 1px solid var(--border);
     border-radius: 2px;
     padding: 8px 10px;
@@ -717,8 +717,8 @@
   .settings-body select:focus-visible,
   .settings-body textarea:focus-visible {
     outline: none;
-    border-color: var(--green-phosphor);
-    box-shadow: 0 0 6px rgba(43, 224, 96, 0.4);
+    border-color: var(--amber-phosphor);
+    box-shadow: 0 0 6px rgba(255, 174, 26, 0.4);
   }
 
   .field-history-wrap {
@@ -740,7 +740,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-left: none;
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -749,7 +749,7 @@
 
   .history-toggle-btn:hover {
     background: var(--panel);
-    border-color: var(--green-phosphor);
+    border-color: var(--amber-phosphor);
   }
 
   .history-dropdown {
@@ -759,7 +759,7 @@
     right: 0;
     z-index: 100;
     background: var(--panel);
-    border: 1px solid var(--green-phosphor);
+    border: 1px solid var(--amber-phosphor);
     max-height: 180px;
     overflow-y: auto;
     margin-top: 2px;
@@ -776,14 +776,14 @@
   }
 
   .history-item:hover {
-    background: var(--green-phosphor);
+    background: var(--amber-phosphor);
     color: var(--bg);
   }
 
   .history-item-del {
     background: transparent;
     border: none;
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
     cursor: pointer;
     padding: 2px 6px;
   }
@@ -801,9 +801,9 @@
 
   .settings-footer button.primary {
     flex: 1 1 auto;
-    background: var(--green-phosphor);
+    background: var(--amber-phosphor);
     color: var(--bg);
-    border: 1px solid var(--green-phosphor);
+    border: 1px solid var(--amber-phosphor);
     padding: 10px 14px;
     font-family: var(--font-term);
     font-size: 0.85em;
@@ -814,13 +814,13 @@
 
   .settings-footer button.primary:hover {
     background: transparent;
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
   }
 
   .settings-footer button.secondary {
     flex: 0 0 auto;
     background: transparent;
-    color: var(--green-phosphor);
+    color: var(--amber-phosphor);
     border: 1px solid var(--border);
     padding: 10px 14px;
     font-family: var(--font-term);
@@ -830,7 +830,7 @@
   }
 
   .settings-footer button.secondary:hover {
-    border-color: var(--green-phosphor);
+    border-color: var(--amber-phosphor);
   }
 
   /* MARKDOWN & CODE BLOCKS - UNIFIED TYPEFACE & SIZE */
@@ -1517,13 +1517,13 @@
 
     const list = getHistory(key);
     if (list.length === 0) {
-      dropdown.innerHTML = '<div class="history-item green-txt" style="cursor:default; opacity:0.6;">< NO SAVED HISTORY ></div>';
+      dropdown.innerHTML = '<div class="history-item amber-txt" style="cursor:default; opacity:0.6;">< NO SAVED HISTORY ></div>';
       return;
     }
 
     let html = '';
     for (const item of list) {
-      html += '<div class="history-item green-txt" data-val="' + escapeHtml(item) + '">';
+      html += '<div class="history-item amber-txt" data-val="' + escapeHtml(item) + '">';
       html += '<span class="history-item-text term-font">' + escapeHtml(item) + '</span>';
       html += '<button type="button" class="history-item-del" title="Delete entry">' + SVG_ICONS.trash + '</button>';
       html += '</div>';
@@ -1630,7 +1630,7 @@
 
     html += '</div>';
     html += '<div class="settings-footer">';
-    html += '<button class="primary" id="saveSettingsBtn">[ SAVE &amp; CONNECT ]</button>';
+    html += '<button class="primary" id="saveSettingsBtn">[ SAVE ]</button>';
     if (CONFIG) {
       html += '<button class="secondary" id="cancelSettingsBtn">[ CANCEL ]</button>';
     }
