@@ -26,7 +26,7 @@
     apiHost:         "https://api.deepinfra.com",
     apiPath:         "v1/openai/chat/completions",
     tavilyApiKey:    "",
-    maxTavilyCalls:  3,
+    maxTavilyCalls:  6,
     model:           "deepseek-ai/DeepSeek-V4-Pro-0813",
     visionModel:     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     imageModel:      "black-forest-labs/FLUX-2-klein-9b",
@@ -70,6 +70,21 @@
 
   function saveConfig(config) {
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+  }
+
+  /**
+   * Parses a "max Tavily calls" value, treating 0 as a valid, deliberate
+   * "tools disabled" setting rather than falling back to the default
+   * (a plain `parseInt(x) || 6` would incorrectly coerce 0 -> 6).
+   */
+  function parseMaxTavilyCalls(value, fallback = DEFAULT_CONFIG.maxTavilyCalls) {
+    const n = parseInt(value, 10);
+    if (Number.isNaN(n) || n < 0) return fallback;
+    return n;
+  }
+
+  function getMaxTavilyCalls() {
+    return parseMaxTavilyCalls(CONFIG?.maxTavilyCalls);
   }
 
   function getHistory(key) {
@@ -1014,7 +1029,7 @@
           </div>
           <div class="field">
             <label for="field-maxTavilyCalls">Max Tavily calls</label>
-            <input type="number" id="field-maxTavilyCalls" class="term-font" placeholder="3">
+            <input type="number" id="field-maxTavilyCalls" class="term-font" placeholder="6" min="0" step="1">
           </div>
           <div class="field">
             <label for="field-model">Default Model</label>
@@ -1242,13 +1257,25 @@
   });
 
   /**
-   * Generates timestamp suffix for system prompts to anchor temporal awareness.
+   * Generates timestamp + tool-availability suffix for system prompts, so the
+   * model is always told (a) the current date/time and (b) exactly how many
+   * Tavily-backed tool calls (web_search / fetch_web_page) it may make this
+   * turn -- including the case where no tools are configured/allowed at all.
    */
   function getFormattedRuntimeContext() {
     const now = new Date();
     if (now.getMinutes() >= 30) now.setHours(now.getHours() + 1);
     now.setMinutes(0, 0, 0);
-    return `\n\n[Runtime Context]\nDate: ${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}\nTime: ~${String(now.getHours()).padStart(2,'0')}:00`;
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    const timeStr = `~${String(now.getHours()).padStart(2,'0')}:00`;
+
+    const maxCalls = getMaxTavilyCalls();
+    const toolsEnabled = !!CONFIG?.tavilyApiKey && maxCalls > 0;
+    const toolLine = toolsEnabled
+      ? `Tools: web_search and fetch_web_page are available. You may make up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`
+      : `Tools: none are available or supported this turn. Do not attempt to call any tools (e.g. web_search, fetch_web_page) -- answer from your own knowledge instead.`;
+
+    return `\n\n[Runtime Context]\nDate: ${dateStr}\nTime: ${timeStr}\n${toolLine}`;
   }
 
   /* 
@@ -1492,7 +1519,7 @@
       apiHost:         document.getElementById('field-apiHost').value.trim(),
       apiPath:         document.getElementById('field-apiPath').value.trim(),
       tavilyApiKey:    document.getElementById('field-tavilyApiKey').value.trim(),
-      maxTavilyCalls:  parseInt(document.getElementById('field-maxTavilyCalls').value, 10) || 3,
+      maxTavilyCalls:  parseMaxTavilyCalls(document.getElementById('field-maxTavilyCalls').value),
       model:           document.getElementById('field-model').value.trim(),
       visionModel:     document.getElementById('field-visionModel').value.trim(),
       imageModel:      document.getElementById('field-imageModel').value.trim() || 'black-forest-labs/FLUX-2-klein-9b',
@@ -1789,9 +1816,10 @@
       apiMessages.push({ role: 'user', content: fullPayload });
     }
 
+    const toolsEnabled = !!CONFIG.tavilyApiKey && getMaxTavilyCalls() > 0;
     const payload = Object.assign(
       { model: activeModel, messages: apiMessages, stream: true },
-      CONFIG.tavilyApiKey ? {
+      toolsEnabled ? {
         tools: [
           { type: 'function', function: { name: 'web_search', description: 'Search web', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
           { type: 'function', function: { name: 'fetch_web_page', description: 'Fetch page', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } } }
@@ -1851,7 +1879,7 @@
 
       const toolCallList = Object.values(accumulatedToolCalls);
       if (toolCallList.length > 0) {
-        const maxCalls = parseInt(CONFIG.maxTavilyCalls, 10) || 3;
+        const maxCalls = getMaxTavilyCalls();
         if (toolRoundCount >= maxCalls) {
           fullText += `\n\n-- MAX TAVILY CALLS REACHED (${maxCalls}). STOPPING TOOL LOOP --`;
           renderMarkdown(contentEl, fullText); addRetryButton(contentEl);
