@@ -431,10 +431,13 @@
     animation: ascii-spin 0.6s steps(4) infinite;
   }
 
+  /* Faux cursor character avoids font issues */
   .placeholder::after {
-    content: "█";
+    content: "";
     display: inline-block;
-    margin-left: 4px;
+    width: 0.55em;
+    height: 1em;
+    background: currentColor;
     animation: blink-cursor 0.8s infinite;
   }
 
