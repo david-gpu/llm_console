@@ -27,6 +27,7 @@
     apiPath:         "v1/openai/chat/completions",
     tavilyApiKey:    "",
     maxTavilyCalls:  6,
+    serviceTier:     "",
     model:           "deepseek-ai/DeepSeek-V4-Pro-0813",
     visionModel:     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     imageModel:      "black-forest-labs/FLUX-2-klein-9b",
@@ -1035,6 +1036,14 @@
             <input type="number" id="field-maxTavilyCalls" class="term-font" placeholder="6" min="0" step="1">
           </div>
           <div class="field">
+            <label for="field-serviceTier">Service Tier</label>
+            <select id="field-serviceTier" class="setting-select term-font">
+              <option value="">(default)</option>
+              <option value="priority">Priority</option>
+              <option value="flex">Flex</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="field-model">Default Model</label>
             <div class="field-history-wrap">
               <input type="text" id="field-model" class="term-font" placeholder="deepseek-ai/DeepSeek-V4-Pro-0813">
@@ -1153,7 +1162,6 @@
   let attachedFiles = [];
   let isProcessing = false;
   let isAutoScrolling = false;
-  let lastPromptPayload = null;
   let conversationMode = null;
   let lastGeneratedImageUrl = null;
   let scrollSpacer = null;
@@ -1523,6 +1531,7 @@
       apiPath:         document.getElementById('field-apiPath').value.trim(),
       tavilyApiKey:    document.getElementById('field-tavilyApiKey').value.trim(),
       maxTavilyCalls:  parseMaxTavilyCalls(document.getElementById('field-maxTavilyCalls').value),
+      serviceTier:     document.getElementById('field-serviceTier').value,
       model:           document.getElementById('field-model').value.trim(),
       visionModel:     document.getElementById('field-visionModel').value.trim(),
       imageModel:      document.getElementById('field-imageModel').value.trim() || 'black-forest-labs/FLUX-2-klein-9b',
@@ -1693,7 +1702,6 @@
   function createUserMessage(text) {
     document.getElementById('emptySplash')?.remove();
     removeScrollSpacer();
-    document.querySelectorAll('.edit-prompt-btn').forEach(btn => btn.remove());
 
     const div = document.createElement('div');
     div.className = 'message user term-font';
@@ -1713,8 +1721,11 @@
 
     if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
 
+    const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
+    lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
+
     if (conversationHistory.length === 0) {
-      conversationMode = null; lastGeneratedImageUrl = null; attachedFiles = [];
+      conversationMode = null; attachedFiles = [];
       updateAttachmentPreview(); sendBtn.disabled = false; sendImgBtn.disabled = false; attachBtn.disabled = false;
       checkEmptyState();
     }
@@ -1750,33 +1761,50 @@
     promptInput.disabled = false; promptInput.value = ''; autoGrow();
   }
 
-  function addRetryButton(container) {
+  function addRetryButton(container, onRetry) {
     container.parentElement.querySelector('.retry-btn')?.remove();
     const btn = document.createElement('button');
     btn.className = 'retry-btn term-font';
     btn.title = 'Retry';
     btn.innerHTML = useIcon('retry', 14, 14);
-    btn.onclick = retryLastPrompt;
+    btn.onclick = onRetry;
     container.parentElement.appendChild(btn);
   }
 
-  async function retryLastPrompt() {
-    if (isProcessing || !lastPromptPayload) return;
-    const failed = lastPromptPayload.failedContainer?.parentElement;
-    if (failed) { 
-      failed.previousElementSibling?.classList.contains('user') && failed.previousElementSibling.remove(); 
-      failed.remove(); 
-    }
+  /**
+   * Retries the specific turn whose retry icon was pressed -- rolls the
+   * conversation (both DOM and conversationHistory) back to right before
+   * that turn's user message, then resends the same prompt/payload. This
+   * discards that turn and any turns that came after it, mirroring what a
+   * fresh send of that same prompt would produce.
+   */
+  async function retryTurn(assistantDiv, isImage, displayPrompt, fullPayload) {
+    if (isProcessing) return;
+    const userDiv = assistantDiv?.previousElementSibling;
+    if (!userDiv || !userDiv.classList.contains('user')) return;
 
-    while (conversationHistory.length > 0 && (conversationHistory[conversationHistory.length - 1].role === 'assistant' || conversationHistory[conversationHistory.length - 1].role === 'user')) {
-      conversationHistory.pop();
-    }
+    const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
+    const uIdx = allUserMsgs.indexOf(userDiv);
 
-    await dismissKeyboard();
-    createUserMessage(lastPromptPayload.displayPrompt);
-    const newEl = createAssistantContainer();
-    if (lastPromptPayload.isImage) executeImageRequest(lastPromptPayload.displayPrompt, newEl);
-    else executePromptRequest(lastPromptPayload.fullPayload, lastPromptPayload.displayPrompt, newEl);
+    let node = userDiv;
+    while (node) { const r = node; node = node.nextElementSibling; r.remove(); }
+
+    if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
+
+    const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
+    lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
+
+    isProcessing = true;
+    try {
+      setLoading(isImage ? sendImgBtn : sendBtn);
+      await dismissKeyboard();
+      createUserMessage(displayPrompt);
+      const newEl = createAssistantContainer();
+      if (isImage) await executeImageRequest(displayPrompt, newEl);
+      else await executePromptRequest(fullPayload, displayPrompt, newEl);
+    } finally {
+      isProcessing = false;
+    }
   }
 
   async function sendPrompt() {
@@ -1803,7 +1831,6 @@
    * ==========================================================================
    */
   async function executePromptRequest(fullPayload, displayPrompt, contentEl, existingApiMessages = null, toolRoundCount = 0) {
-    lastPromptPayload = { isImage: false, displayPrompt, fullPayload, failedContainer: contentEl };
     const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i.type === 'image_url');
     const activeModel = (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
     updateStatusBar(activeModel);
@@ -1829,6 +1856,7 @@
         ]
       } : {},
       (CONFIG.reasoningEffort && CONFIG.reasoningEffort !== 'none') ? { reasoning_effort: CONFIG.reasoningEffort } : {},
+      (CONFIG.serviceTier === 'priority' || CONFIG.serviceTier === 'flex') ? { service_tier: CONFIG.serviceTier } : {},
       CONFIG.extraParams
     );
 
@@ -1837,7 +1865,7 @@
       const res = await apiFetch(CONFIG.apiPath, payload);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
-        setError(contentEl, err); addRetryButton(contentEl); if (!existingApiMessages) conversationHistory.pop();
+        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop();
         showError(err); resetInput(); return;
       }
 
@@ -1885,7 +1913,7 @@
         const maxCalls = getMaxTavilyCalls();
         if (toolRoundCount >= maxCalls) {
           fullText += `\n\n-- MAX TAVILY CALLS REACHED (${maxCalls}). STOPPING TOOL LOOP --`;
-          renderMarkdown(contentEl, fullText); addRetryButton(contentEl);
+          renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
           conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return;
         }
 
@@ -1908,11 +1936,11 @@
         return await executePromptRequest(fullPayload, displayPrompt, contentEl, apiMessages, toolRoundCount + 1);
       }
 
-      renderMarkdown(contentEl, fullText); addRetryButton(contentEl);
+      renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
       conversationHistory.push({ role: 'assistant', content: fullText }); resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
-      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl); showError(err.message); if (!existingApiMessages) conversationHistory.pop(); resetInput();
+      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
+      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); showError(err.message); if (!existingApiMessages) conversationHistory.pop(); resetInput();
     } finally { 
       abortController = null; 
     }
@@ -1934,7 +1962,6 @@
   }
 
   async function executeImageRequest(promptText, contentEl) {
-    lastPromptPayload = { isImage: true, displayPrompt: promptText, failedContainer: contentEl };
     const targetModel = CONFIG.imageModel || 'black-forest-labs/FLUX-2-klein-9b';
     updateStatusBar(targetModel);
     conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText });
@@ -1946,7 +1973,7 @@
       const res = await apiFetch('v1/openai/images/generations', payload);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
-        setError(contentEl, err); addRetryButton(contentEl); conversationHistory.pop(); showError(err); resetInput(); return;
+        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); showError(err); resetInput(); return;
       }
 
       const data = await res.json();
@@ -1957,13 +1984,13 @@
       const imgEl = document.createElement('img');
       imgEl.src = imageUrl; imgEl.className = 'img-thumbnail'; imgEl.alt = promptText;
       imgEl.onclick = () => openLightbox(imageUrl);
-      contentEl.appendChild(imgEl); addRetryButton(contentEl);
+      contentEl.appendChild(imgEl); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null));
 
       lastGeneratedImageUrl = imageUrl;
       conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl }); resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl); resetInput(); return; }
-      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl); showError(err.message); conversationHistory.pop(); resetInput();
+      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); resetInput(); return; }
+      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); showError(err.message); conversationHistory.pop(); resetInput();
     } finally { 
       abortController = null; 
     }
