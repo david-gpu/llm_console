@@ -455,7 +455,14 @@
     50%, 100% { opacity: 0; }
   }
 
-  /* INPUT BAR CONTROLS */
+  /* INPUT BAR CONTROLS
+   * Visibility is driven by JS setting `margin-bottom` to a negative value
+   * (see setInputBarHiddenPx below). This shrinks the bar's reserved space
+   * in the flex column (so the conversation viewer reclaims that space)
+   * while the bar's own box keeps its natural height and simply slides,
+   * as a rigid whole, down past the bottom edge of the screen — rather
+   * than being clipped/squashed from one edge. The two effects share a
+   * single px value so they always stay in lockstep with the drag. */
   .inputbar {
     flex: 0 0 auto;
     border-top: 1px solid var(--border);
@@ -465,13 +472,17 @@
     align-items: flex-end;
     gap: 8px;
     flex-wrap: nowrap;
-    transition: transform 0.3s ease;
-    will-change: transform;
+    margin-bottom: 0;
   }
 
-  /* GPU-TRANSFORM ONLY HIDE TO PREVENT FLEX CONTAINER RESIZING SHIFTS */
-  .inputbar.hidden {
-    transform: translateY(100%);
+  /* Only used for programmatic reveals (e.g. focusing the textarea), never
+   * while actively tracking a scroll/drag — that tracking must be instant
+   * and 1:1 with the drag, not eased. */
+  .inputbar.animate-visibility {
+    transition: margin-bottom 0.22s ease;
+  }
+
+  .inputbar.fully-hidden {
     pointer-events: none;
   }
 
@@ -546,10 +557,31 @@
     font-weight: bold;
   }
 
-  .attach-btn:hover,
-  .gear-btn:hover,
-  button.send:not(:disabled):hover,
-  button.send-img:not(:disabled):hover {
+  /* Scoped to devices that actually support hovering. On touch devices a
+   * tap can otherwise leave a button stuck in :hover until the user taps
+   * elsewhere, which — since it shares the same amber highlight as
+   * .active below — made the attach button look like it never turned back
+   * off after a second tap, even though its state had toggled correctly. */
+  @media (hover: hover) and (pointer: fine) {
+    .attach-btn:hover,
+    .gear-btn:hover,
+    button.send:not(:disabled):hover,
+    button.send-img:not(:disabled):hover {
+      background: var(--amber-phosphor);
+      color: var(--bg);
+    }
+
+    button.send.stop:not(:disabled):hover,
+    button.send-img.stop:not(:disabled):hover {
+      background: var(--red-phosphor);
+      color: var(--bg);
+    }
+  }
+
+  /* ACTIVE = files are currently attached and waiting to be sent. Shown as
+   * a highlighted button instead of listing filenames, which tend to eat
+   * up the whole input row. Tapping again while active clears them. */
+  .attach-btn.active {
     background: var(--amber-phosphor);
     color: var(--bg);
   }
@@ -567,40 +599,6 @@
   button.send-img.stop {
     color: var(--red-phosphor);
     border-color: var(--red-phosphor);
-  }
-
-  button.send.stop:not(:disabled):hover,
-  button.send-img.stop:not(:disabled):hover {
-    background: var(--red-phosphor);
-    color: var(--bg);
-  }
-
-  .attachment-preview {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin: 4px 4px 0 0;
-    padding: 4px 8px;
-    background: var(--panel);
-    border: 1px solid var(--amber-phosphor);
-    border-radius: 2px;
-    font-size: 0.8em;
-    color: var(--amber-phosphor);
-  }
-
-  .remove-attachment-btn {
-    background: transparent;
-    border: none;
-    color: var(--amber-phosphor);
-    cursor: pointer;
-    padding: 0 2px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .remove-attachment-btn:hover {
-    color: var(--red-phosphor);
   }
 
   .img-thumbnail {
@@ -953,20 +951,11 @@
     color: var(--green-phosphor);
   }
 
-  .error-container {
-    position: fixed;
-    top: 45px;
-    right: 15px;
-    background: var(--bg);
-    border: 1px solid var(--red-phosphor);
-    color: var(--red-phosphor);
-    padding: 10px 14px;
-    z-index: 1000;
-    display: none;
-    max-width: 340px;
-    font-family: var(--font-term);
-    font-size: var(--font-size-base);
-    text-align: left;
+  /* PERSISTENT SETTINGS-FORM ERROR (replaces the old ephemeral top popup) */
+  .settings-error {
+    flex: 0 0 auto;
+    padding: 8px 14px 0;
+    background: var(--panel);
   }
 </style>
 </head>
@@ -1106,6 +1095,7 @@
             <textarea id="field-systemPrompt" class="term-font" placeholder="You are a helpful assistant." rows="4"></textarea>
           </div>
         </div>
+        <div class="settings-error error-msg-text term-font" id="settingsError" style="display:none;"></div>
         <div class="settings-footer">
           <button class="primary" id="saveSettingsBtn">[ SAVE ]</button>
           <button class="secondary" id="cancelSettingsBtn" style="display:none;">[ CANCEL ]</button>
@@ -1129,7 +1119,6 @@
   </div>
 
   <input type="file" id="fileInput" multiple style="display:none;" />
-  <div class="error-container term-font" id="errorContainer"></div>
 
   <!-- LIGHTBOX CONTAINER FOR FULLSCREEN IMAGE ZOOM -->
   <div id="lightbox" class="lightbox-overlay" style="display:none;">
@@ -1150,7 +1139,7 @@
   const gearBtn = document.getElementById('gearBtn');
   const fileInput = document.getElementById('fileInput');
   const attachBtn = document.getElementById('attachBtn');
-  const errorContainer = document.getElementById('errorContainer');
+  const settingsError = document.getElementById('settingsError');
   const lightbox = document.getElementById('lightbox');
   const lightboxImg = document.getElementById('lightboxImg');
   const lightboxClose = document.getElementById('lightboxClose');
@@ -1473,11 +1462,16 @@
     container.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
   }
 
-  function showError(message) {
-    errorContainer.textContent = '< SYS_ERR: ' + message + ' >';
-    errorContainer.style.display = 'block';
-    clearTimeout(errorContainer._hideTimeout);
-    errorContainer._hideTimeout = setTimeout(() => { errorContainer.style.display = 'none'; }, 5000);
+  /* Persistent (non-ephemeral) error text for the settings form, shown
+   * inline under the fields rather than in a popup. */
+  function showSettingsError(message) {
+    settingsError.textContent = '< ERROR: ' + message + ' >';
+    settingsError.style.display = 'block';
+  }
+
+  function clearSettingsError() {
+    settingsError.style.display = 'none';
+    settingsError.textContent = '';
   }
 
   /* 
@@ -1544,10 +1538,11 @@
     };
 
     if (!newConfig.apiKey || !newConfig.apiHost || !newConfig.apiPath || !newConfig.model) {
-      showError('Please fill in all required fields.'); 
+      showSettingsError('Please fill in all required fields.');
       return;
     }
 
+    clearSettingsError();
     CONFIG = newConfig;
     saveConfig(CONFIG);
     settingsScreen.style.display = 'none';
@@ -1567,8 +1562,8 @@
   });
 
   document.getElementById('saveSettingsBtn').onclick = saveSettingsFromForm;
-  document.getElementById('cancelSettingsBtn').onclick = () => { settingsScreen.style.display = 'none'; promptInput.focus(); };
-  gearBtn.onclick = () => { loadSettingsIntoForm(); settingsScreen.style.display = 'flex'; };
+  document.getElementById('cancelSettingsBtn').onclick = () => { clearSettingsError(); settingsScreen.style.display = 'none'; promptInput.focus(); };
+  gearBtn.onclick = () => { clearSettingsError(); loadSettingsIntoForm(); settingsScreen.style.display = 'flex'; };
 
   function updateStatusBar(activeModel = null) {
     if (!CONFIG) { statusHost.textContent = 'NOT CONFIGURED'; statusModel.textContent = ''; return; }
@@ -1576,31 +1571,32 @@
     statusModel.textContent = (activeModel || CONFIG.model).split('/').pop();
   }
 
-  /* FILE ATTACHMENTS */
-  attachBtn.onclick = () => { if (conversationMode !== 'image') fileInput.click(); };
+  /* FILE ATTACHMENTS
+   * No filenames are rendered in the input row (they tend to fill the
+   * whole space) — instead the attach button itself is highlighted
+   * ("active") whenever there are pending attachments. Tapping it while
+   * active clears the attachments; tapping it while inactive opens the
+   * file picker. */
+  attachBtn.onclick = () => {
+    if (conversationMode === 'image') return;
+    if (attachedFiles.length > 0) {
+      attachedFiles = [];
+      updateAttachButtonState();
+    } else {
+      fileInput.click();
+    }
+  };
   fileInput.onchange = (e) => {
     attachedFiles = attachedFiles.concat(Array.from(e.target.files));
-    updateAttachmentPreview();
+    updateAttachButtonState();
     fileInput.value = '';
   };
 
-  function updateAttachmentPreview() {
-    document.querySelectorAll('.attachment-preview').forEach(el => el.remove());
-    attachedFiles.forEach((file, index) => {
-      const preview = document.createElement('span');
-      preview.className = 'attachment-preview term-font';
-      preview.innerHTML = `<span>${useIcon('file', 14, 14)} ${escapeHtml(file.name)} (${formatFileSize(file.size)})</span><button type="button" class="remove-attachment-btn" title="Remove attachment">${useIcon('close', 12, 12)}</button>`;
-      preview.querySelector('.remove-attachment-btn').onclick = (e) => { 
-        e.stopPropagation(); attachedFiles.splice(index, 1); updateAttachmentPreview(); 
-      };
-      inputbar.insertBefore(preview, inputbar.firstChild);
-    });
-  }
-
-  function formatFileSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  function updateAttachButtonState() {
+    attachBtn.classList.toggle('active', attachedFiles.length > 0);
+    attachBtn.title = attachedFiles.length > 0
+      ? `${attachedFiles.length} file(s) attached — tap to clear`
+      : 'Attach file';
   }
 
   async function buildMultimodalContent(promptText, files) {
@@ -1627,20 +1623,56 @@
   function autoGrow() {
     promptInput.style.height = 'auto';
     promptInput.style.height = Math.max(86, Math.min(promptInput.scrollHeight, 240)) + 'px';
+    /* The textarea's height feeds into the input bar's natural height, so
+     * re-apply the current hide amount against the (possibly new) natural
+     * height to keep it consistent. */
+    setInputBarHiddenPx(inputBarHiddenPx, false);
   }
   promptInput.addEventListener('input', autoGrow);
+
+  /* Input bar visibility is expressed as a single px value: how much of the
+   * bar's natural height is currently tucked away below the bottom edge.
+   * 0 = fully visible, offsetHeight = fully hidden. Driving both the
+   * negative margin-bottom (which shrinks the bar's reserved space in the
+   * flex column, letting the conversation viewer reclaim it) AND the
+   * effective on-screen position from this one value keeps the two
+   * perfectly in sync: the bar slides down as a rigid whole, disappearing
+   * under the bottom edge, while the conversation grows into the space
+   * it vacates — at exactly the same rate, in either direction. */
+  let inputBarHiddenPx = 0;
+
+  function setInputBarHiddenPx(px, animate) {
+    const natural = inputbar.offsetHeight;
+    inputBarHiddenPx = Math.max(0, Math.min(natural, px));
+    inputbar.classList.toggle('animate-visibility', !!animate);
+    inputbar.classList.toggle('fully-hidden', inputBarHiddenPx >= natural - 0.5);
+    inputbar.style.marginBottom = (-inputBarHiddenPx) + 'px';
+  }
+
+  function showInputBar(animate = true) { setInputBarHiddenPx(0, animate); }
 
   let lastScrollTop = 0;
   conversationWrap.addEventListener('scroll', () => {
     if (isAutoScrolling || isProcessing) return;
-    const st = conversationWrap.scrollTop, maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight, diff = st - lastScrollTop;
-    if (diff < -10 && st > 20) inputbar.classList.add('hidden');
-    else if (diff > 10 || st >= maxScroll - 20) inputbar.classList.remove('hidden');
+    const st = conversationWrap.scrollTop;
+    const maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight;
+    const diff = st - lastScrollTop;
     lastScrollTop = Math.max(0, st);
+    if (!diff) return;
+
+    /* diff > 0: content scrolling toward the bottom (dragging up) -> reveal.
+     * diff < 0: content scrolling toward the top (dragging down) -> hide.
+     * Every pixel of scroll maps 1:1 to the bar's hidden amount, with no
+     * dead-zone/threshold, so the response is identical whether the drag
+     * is slow or fast. Never eased while tracking a drag. */
+    setInputBarHiddenPx(inputBarHiddenPx - diff, false);
+
+    /* Always land fully visible once caught up to the latest message. */
+    if (st >= maxScroll - 4) setInputBarHiddenPx(0, false);
   });
 
   promptInput.addEventListener('focus', () => {
-    inputbar.classList.remove('hidden');
+    showInputBar(true);
     setTimeout(() => promptInput.scrollIntoView({ block: 'end', behavior: 'smooth' }), 50);
   });
 
@@ -1726,7 +1758,7 @@
 
     if (conversationHistory.length === 0) {
       conversationMode = null; attachedFiles = [];
-      updateAttachmentPreview(); sendBtn.disabled = false; sendImgBtn.disabled = false; attachBtn.disabled = false;
+      updateAttachButtonState(); sendBtn.disabled = false; sendImgBtn.disabled = false; attachBtn.disabled = false;
       checkEmptyState();
     }
 
@@ -1815,6 +1847,12 @@
     promptInput.value = ''; autoGrow(); lockConversationMode('chat'); isProcessing = true;
     try {
       const fullPayload = await buildMultimodalContent(prompt, attachedFiles);
+      /* Attachments are embedded into this turn's message content, which is
+       * itself stored in conversationHistory and resent as part of the full
+       * thread on every subsequent turn. So there's no need to keep them
+       * around in attachedFiles to be re-embedded again on the next send. */
+      attachedFiles = [];
+      updateAttachButtonState();
       setLoading(sendBtn);
       await dismissKeyboard();
       const displayPrompt = prompt || '-- files attached --';
@@ -1866,7 +1904,7 @@
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
         setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop();
-        showError(err); resetInput(); return;
+        resetInput(); return;
       }
 
       const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -1940,7 +1978,7 @@
       conversationHistory.push({ role: 'assistant', content: fullText }); resetInput();
     } catch (err) {
       if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
-      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); showError(err.message); if (!existingApiMessages) conversationHistory.pop(); resetInput();
+      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop(); resetInput();
     } finally { 
       abortController = null; 
     }
@@ -1973,7 +2011,7 @@
       const res = await apiFetch('v1/openai/images/generations', payload);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
-        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); showError(err); resetInput(); return;
+        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput(); return;
       }
 
       const data = await res.json();
@@ -1990,7 +2028,7 @@
       conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl }); resetInput();
     } catch (err) {
       if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); resetInput(); return; }
-      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); showError(err.message); conversationHistory.pop(); resetInput();
+      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput();
     } finally { 
       abortController = null; 
     }
