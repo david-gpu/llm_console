@@ -4,8 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, interactive-widget=resizes-content">
 <title>LLM CONSOLE</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+<!-- CSP EGRESS ALLOWLIST. connect-src is the outbound firewall: scripts in this
+     page may only open network connections to the hosts listed below. If you
+     change CONFIG.apiHost to a different provider, you MUST add that host
+     here as well, or fetch() will be silently blocked by the browser. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+               style-src 'self' 'unsafe-inline';
+               img-src data: blob: https:;
+               connect-src https://api.deepinfra.com https://api.tavily.com;">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"
+        integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM"
+        crossorigin="anonymous"></script>
 <script>
   /* 
    * ==========================================================================
@@ -112,10 +126,16 @@
     localStorage.setItem(HISTORY_PREFIX + key, JSON.stringify(list));
   }
 
+  /* Pure string escaper. Covers the full HTML-sensitive set INCLUDING single
+   * and double quotes, because escaped output is also interpolated into
+   * attribute contexts (data-val, title, etc.) where a bare quote breaks out. */
   function escapeHtml(value) {
-    const div = document.createElement('div');
-    div.textContent = value;
-    return div.innerHTML;
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function extractDomainName(urlStr) {
@@ -1148,7 +1168,13 @@
   /* APP STATE */
   let CONFIG = null;
   let conversationHistory = [];
-  let abortController = null;
+  /* Abort controller for the CURRENT turn's primary request(s), including
+   * Tavily tool calls made within that turn. Created per-turn by
+   * sendPrompt / sendImagePrompt / retryTurn; the stop button aborts it.
+   * Subsidiary one-off requests (e.g. generateLLMFilename) deliberately do
+   * NOT touch this handle -- they are passed no signal at all, so they can
+   * neither be accidentally aborted nor clobber the live turn's controller. */
+  let activeAbortController = null;
   let attachedFiles = [];
   let isProcessing = false;
   let isAutoScrolling = false;
@@ -1159,12 +1185,15 @@
 
   /**
    * Centralized HTTP Fetch wrapper.
-   * Handles host cleaning, endpoint formatting, signal association, and auth headers
-   * to remove repetitive network code across text streaming and image generation.
+   * Handles host cleaning, endpoint formatting and auth headers. The abort
+   * signal is now an explicit parameter owned by the caller rather than a
+   * global set here -- previously every call (including the incidental
+   * filename-generation call made mid-stream from a code block's download
+   * button) overwrote the global, breaking the stop button for the live
+   * request. Callers that don't care pass no signal at all.
    */
-  async function apiFetch(path, bodyData) {
+  async function apiFetch(path, bodyData, signal) {
     const url = CONFIG.apiHost.replace(/\/$/, '') + '/' + path.replace(/^\//, '');
-    abortController = new AbortController();
     return await fetch(url, {
       method: 'POST',
       headers: {
@@ -1172,7 +1201,7 @@
         'Authorization': 'Bearer ' + CONFIG.apiKey
       },
       body: JSON.stringify(bodyData),
-      signal: abortController.signal
+      signal: signal
     });
   }
 
@@ -1283,25 +1312,30 @@
    * ==========================================================================
    * TAVILY SERVICE INTEGRATION
    * Directly queries live web data or page contents when called by function-calling.
+   * Both take the current turn's abort signal, so the stop button cancels an
+   * in-flight search. AbortError is rethrown by the callers (not swallowed
+   * into a tool-error result) so the whole turn tears down cleanly.
    * ==========================================================================
    */
-  async function executeTavilySearch(query) {
+  async function executeTavilySearch(query, signal) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
-      body: JSON.stringify({ query: query, max_results: 5, search_depth: 'basic' })
+      body: JSON.stringify({ query: query, max_results: 5, search_depth: 'basic' }),
+      signal: signal
     });
     if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Search failed');
     return JSON.stringify((await res.json()).results || []);
   }
 
-  async function executeTavilyExtract(urls) {
+  async function executeTavilyExtract(urls, signal) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const res = await fetch('https://api.tavily.com/extract', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
-      body: JSON.stringify({ urls: Array.isArray(urls) ? urls : [urls] })
+      body: JSON.stringify({ urls: Array.isArray(urls) ? urls : [urls] }),
+      signal: signal
     });
     if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Extraction failed');
     return JSON.stringify((await res.json()).results || []);
@@ -1347,8 +1381,29 @@
   }
 
   /**
+   * Whitelist sanitizer for download filenames. The raw value comes from LLM
+   * output (which is itself steerable via prompt injection through the code
+   * snippet's own comments), so it is treated as doubly untrusted: path
+   * components are destroyed, the charset is allowlisted to
+   * [a-zA-Z0-9._-], and a sane extension is enforced. Worst case output is
+   * a boring "snippet.txt". Blacklists are not used on principle.
+   */
+  function sanitizeFilename(raw) {
+    let base = String(raw || '')
+      .split(/[\\/]/).pop()                    /* kill path components outright */
+      .replace(/[^a-zA-Z0-9._-]/g, '')         /* allowlist only safe chars */
+      .replace(/\.{2,}/g, '.')                 /* collapse '..' runs */
+      .replace(/^[-.]+/, '');                  /* no leading dots/dashes */
+    if (!base) return 'snippet.txt';
+    if (!/\.[a-zA-Z0-9]{1,8}$/.test(base)) base += '.txt';
+    return base;
+  }
+
+  /**
    * Queries the configured fast LLM model to dynamically generate a clean filename
-   * for code download buttons.
+   * for code download buttons. Deliberately abortable by nothing: this is a
+   * fire-and-forget subsidiary call and is passed no signal, so it cannot
+   * clobber the active turn's abort controller.
    */
   async function generateLLMFilename(codeText) {
     if (!CONFIG || !CONFIG.apiKey) return 'snippet.txt';
@@ -1434,7 +1489,7 @@
           e.stopPropagation();
           const code = readCode();
           dlBtn.innerHTML = `<span class="term-font" style="font-size:0.85em; padding:0 6px;">-- Downloading --</span>`;
-          const filename = await generateLLMFilename(code);
+          const filename = sanitizeFilename(await generateLLMFilename(code));
           const a = document.createElement('a');
           a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
           a.download = filename;
@@ -1479,27 +1534,55 @@
    * Reads from / writes to HTML static inputs instead of constructing innerHTML.
    * ==========================================================================
    */
+  /* History values are arbitrary user-entered strings and are now built via
+   * DOM APIs with textContent / closures -- no string interpolation into
+   * attributes. (The old data-val="${escapeHtml(item)}" pattern was an
+   * attribute-injection vector: the previous escapeHtml did not encode
+   * quotes, so a value containing " could break out and carry arbitrary
+   * attributes into the settings screen, which has access to the config
+   * in localStorage.) */
   function populateHistoryDropdown(key) {
     const dropdown = document.getElementById('history-dropdown-' + key);
     const input = document.getElementById('field-' + key);
     const list = getHistory(key);
+    dropdown.innerHTML = '';
 
     if (list.length === 0) {
-      dropdown.innerHTML = '<div class="history-item amber-txt" style="cursor:default; opacity:0.6;">< NO SAVED HISTORY ></div>';
+      const empty = document.createElement('div');
+      empty.className = 'history-item amber-txt';
+      empty.style.cursor = 'default';
+      empty.style.opacity = '0.6';
+      empty.textContent = '< NO SAVED HISTORY >';
+      dropdown.appendChild(empty);
       return;
     }
 
-    dropdown.innerHTML = list.map(item => `<div class="history-item amber-txt" data-val="${escapeHtml(item)}"><span class="history-item-text term-font">${escapeHtml(item)}</span><button type="button" class="history-item-del" title="Delete entry">${useIcon('trash', 13, 13)}</button></div>`).join('');
+    list.forEach(item => {
+      const el = document.createElement('div');
+      el.className = 'history-item amber-txt';
 
-    dropdown.querySelectorAll('.history-item').forEach(el => {
+      const label = document.createElement('span');
+      label.className = 'history-item-text term-font';
+      label.textContent = item;
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'history-item-del';
+      del.title = 'Delete entry';
+      del.innerHTML = useIcon('trash', 13, 13);
+
+      el.append(label, del);
       el.onclick = (e) => {
-        const itemVal = el.getAttribute('data-val');
         if (e.target.closest('.history-item-del')) {
-          e.stopPropagation(); removeHistoryValue(key, itemVal); populateHistoryDropdown(key);
+          e.stopPropagation();
+          removeHistoryValue(key, item);
+          populateHistoryDropdown(key);
         } else {
-          input.value = itemVal; dropdown.style.display = 'none';
+          input.value = item;
+          dropdown.style.display = 'none';
         }
       };
+      dropdown.appendChild(el);
     });
   }
 
@@ -1826,13 +1909,14 @@
     lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
 
     isProcessing = true;
+    activeAbortController = new AbortController();
     try {
       setLoading(isImage ? sendImgBtn : sendBtn);
       await dismissKeyboard();
       createUserMessage(displayPrompt);
       const newEl = createAssistantContainer();
-      if (isImage) await executeImageRequest(displayPrompt, newEl);
-      else await executePromptRequest(fullPayload, displayPrompt, newEl);
+      if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal);
+      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal);
     } finally {
       isProcessing = false;
     }
@@ -1844,6 +1928,7 @@
     if ((!prompt && attachedFiles.length === 0) || !CONFIG) return;
 
     promptInput.value = ''; autoGrow(); lockConversationMode('chat'); isProcessing = true;
+    activeAbortController = new AbortController();
     try {
       const fullPayload = await buildMultimodalContent(prompt, attachedFiles);
       /* Attachments are embedded into this turn's message content, which is
@@ -1856,7 +1941,7 @@
       await dismissKeyboard();
       const displayPrompt = prompt || '-- files attached --';
       createUserMessage(displayPrompt);
-      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer());
+      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal);
     } finally { 
       isProcessing = false; 
     }
@@ -1867,7 +1952,19 @@
    * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
    * ==========================================================================
    */
-  async function executePromptRequest(fullPayload, displayPrompt, contentEl, existingApiMessages = null, toolRoundCount = 0) {
+  /* Base64 image parts are only sent for the CURRENT (latest) user turn.
+   * When replaying older turns from conversationHistory, image parts are
+   * substituted with a text placeholder: the vision model already received
+   * the pixels once, and re-uploading hundreds of KB of base64 on every
+   * subsequent turn was a pure bandwidth/serialization tax. */
+  function stripStaleImages(content) {
+    if (!Array.isArray(content)) return content;
+    return content.map(p => (p && p.type === 'image_url')
+      ? { type: 'text', text: '[image attachment omitted]' }
+      : p);
+  }
+
+  async function executePromptRequest(fullPayload, displayPrompt, contentEl, signal, existingApiMessages = null, toolRoundCount = 0) {
     const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i.type === 'image_url');
     const activeModel = (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
     updateStatusBar(activeModel);
@@ -1878,7 +1975,7 @@
       apiMessages = [{ role: 'system', content: CONFIG.systemPrompt + getFormattedRuntimeContext() }];
       for (let i = 0; i < conversationHistory.length - 1; i++) {
         const item = conversationHistory[i];
-        apiMessages.push({ role: item.role, content: item.content, ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
+        apiMessages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
       }
       apiMessages.push({ role: 'user', content: fullPayload });
     }
@@ -1899,7 +1996,7 @@
 
     let fullText = '', accumulatedToolCalls = {};
     try {
-      const res = await apiFetch(CONFIG.apiPath, payload);
+      const res = await apiFetch(CONFIG.apiPath, payload, signal);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
         setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop();
@@ -1962,15 +2059,20 @@
             const args = JSON.parse(tc.arguments || '{}');
             if (tc.name === 'web_search') {
               renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`);
-              resultStr = await executeTavilySearch(args.query);
+              resultStr = await executeTavilySearch(args.query, signal);
             } else if (tc.name === 'fetch_web_page') {
               renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- FETCHING WEB PAGE... --</div>`);
-              resultStr = await executeTavilyExtract(args.urls);
+              resultStr = await executeTavilyExtract(args.urls, signal);
             }
-          } catch (err) { resultStr = JSON.stringify({ error: err.message }); }
+          } catch (err) {
+            /* A user-initiated abort must tear down the whole turn, not be
+             * recorded as a tool error and fed back to the model. */
+            if (err.name === 'AbortError') throw err;
+            resultStr = JSON.stringify({ error: err.message });
+          }
           apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
         }
-        return await executePromptRequest(fullPayload, displayPrompt, contentEl, apiMessages, toolRoundCount + 1);
+        return await executePromptRequest(fullPayload, displayPrompt, contentEl, signal, apiMessages, toolRoundCount + 1);
       }
 
       renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
@@ -1979,7 +2081,7 @@
       if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
       setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop(); resetInput();
     } finally { 
-      abortController = null; 
+      activeAbortController = null; 
     }
   }
 
@@ -1990,15 +2092,16 @@
     if (!prompt || !CONFIG) return;
 
     promptInput.value = ''; autoGrow(); lockConversationMode('image'); isProcessing = true;
+    activeAbortController = new AbortController();
     try {
       setLoading(sendImgBtn); await dismissKeyboard(); createUserMessage(prompt);
-      await executeImageRequest(prompt, createAssistantContainer());
+      await executeImageRequest(prompt, createAssistantContainer(), activeAbortController.signal);
     } finally { 
       isProcessing = false; 
     }
   }
 
-  async function executeImageRequest(promptText, contentEl) {
+  async function executeImageRequest(promptText, contentEl, signal) {
     const targetModel = CONFIG.imageModel || 'black-forest-labs/FLUX-2-klein-9b';
     updateStatusBar(targetModel);
     conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText });
@@ -2007,7 +2110,7 @@
     if (lastGeneratedImageUrl) payload.image = lastGeneratedImageUrl;
 
     try {
-      const res = await apiFetch('v1/openai/images/generations', payload);
+      const res = await apiFetch('v1/openai/images/generations', payload, signal);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
         setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput(); return;
@@ -2029,12 +2132,12 @@
       if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); resetInput(); return; }
       setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput();
     } finally { 
-      abortController = null; 
+      activeAbortController = null; 
     }
   }
 
-  sendBtn.onclick = () => { if (sendBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendPrompt(); };
-  sendImgBtn.onclick = () => { if (sendImgBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendImagePrompt(); };
+  sendBtn.onclick = () => { if (sendBtn.classList.contains('stop')) activeAbortController?.abort(); else if (!isProcessing) sendPrompt(); };
+  sendImgBtn.onclick = () => { if (sendImgBtn.classList.contains('stop')) activeAbortController?.abort(); else if (!isProcessing) sendImagePrompt(); };
 
   /* 
    * ==========================================================================
