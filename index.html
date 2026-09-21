@@ -2037,6 +2037,29 @@
   sendBtn.onclick = () => { if (sendBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendPrompt(); };
   sendImgBtn.onclick = () => { if (sendImgBtn.classList.contains('stop')) abortController?.abort(); else if (!isProcessing) sendImagePrompt(); };
 
+  /* 
+   * ==========================================================================
+   * DESKTOP KEYBOARD SUBMIT SHORTCUT
+   * On devices with a fine pointer (desktop), Enter submits the prompt and
+   * Shift+Enter inserts a newline (multi-paragraph input). On touch devices
+   * (primary pointer: coarse), Enter keeps inserting newlines as before --
+   * the Send button remains the submit gesture there. Submission routes to
+   * the mode-appropriate handler: text send in chat mode, image generation
+   * when the conversation is locked to image mode. e.isComposing guards
+   * against submitting mid-IME-composition (CJK input, dead keys, etc.).
+   * ==========================================================================
+   */
+  const isDesktopPointer = window.matchMedia('(hover: hover) and (pointer: fine)');
+
+  promptInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    if (!isDesktopPointer.matches) return;
+    e.preventDefault();
+    if (isProcessing) return;
+    if (conversationMode === 'image') sendImagePrompt();
+    else sendPrompt();
+  });
+
   /* INITIALIZATION */
   const savedConfig = loadConfig();
   if (savedConfig) { 
@@ -2049,6 +2072,11 @@
     settingsScreen.style.display = 'flex'; 
   }
   checkEmptyState();
+  /* Focus the prompt input on load (mobile & desktop alike) when the app
+   * is ready for input. When no config exists, the settings screen covers
+   * the page and owns the focus instead. */
+  if (CONFIG) promptInput.focus();
 </script>
 </body>
 </html>
+
