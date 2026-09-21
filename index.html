@@ -201,9 +201,9 @@
       /* 2. Vertical RGB Subpixel Mask */
       repeating-linear-gradient(
         90deg,
-        rgba(255, 0, 0, 0.03),
-        rgba(0, 255, 0, 0.03) 1px,
-        rgba(0, 0, 255, 0.03) 2px,
+        rgba(255,   0,   0, 0.03),
+        rgba(0,   255,   0, 0.03) 1px,
+        rgba(0,     0, 255, 0.03) 2px,
         transparent 3px
       ),
       /* 3. Outer Edge Vignette */
@@ -881,7 +881,6 @@
     border: 1px solid var(--border);
     background: var(--panel);
     position: relative;
-    cursor: pointer;
   }
 
   .code-block-wrapper.collapsed pre {
@@ -904,30 +903,32 @@
     text-transform: uppercase;
   }
 
-  /* CODE CONTEXT MENU / EPHEMERAL TOAST */
-  .code-context-menu {
-    position: fixed;
-    z-index: 3000;
-    background: var(--panel);
-    border: 1px solid var(--green-phosphor);
+  /* CODE BLOCK ACTION BUTTONS (COPY / DOWNLOAD)
+   * Persistent icon buttons pinned to the bottom-left of every code
+   * block, matching the placement and styling philosophy of the
+   * edit-prompt and retry icons. Identical UX on touch and desktop. */
+  .code-actions {
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 4px;
+    margin-top: 6px;
   }
 
-  .code-context-menu button {
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--green-phosphor);
-    padding: 6px;
-    cursor: pointer;
+  .code-actions button {
     display: flex;
     align-items: center;
     justify-content: center;
+    background: transparent;
+    border: 1px solid var(--green-phosphor);
+    color: var(--green-phosphor);
+    border-radius: 2px;
+    padding: 4px 10px;
+    font-family: var(--font-term);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
   }
 
-  .code-context-menu button:hover {
+  .code-actions button:hover {
     background: var(--green-phosphor);
     color: var(--bg);
   }
@@ -1365,52 +1366,13 @@
     }
   }
 
-  /* CODE CONTEXT MENU CONTROLLER */
-  let activeContextMenu = null;
-  function dismissContextMenu() { 
-    if (activeContextMenu) { 
-      activeContextMenu.remove(); 
-      activeContextMenu = null; 
-    } 
-  }
-
+  /* Global click-away handler for settings history dropdowns */
   document.addEventListener('click', (e) => {
-    if (activeContextMenu && !activeContextMenu.contains(e.target)) dismissContextMenu();
     if (!e.target.closest('.field-history-wrap')) document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
   });
 
-  function showCodeContextMenu(x, y, codeText) {
-    dismissContextMenu();
-    const menu = document.createElement('div');
-    menu.className = 'code-context-menu';
-    menu.style.left = `${Math.min(x, window.innerWidth - 94)}px`;
-    menu.style.top = `${Math.min(y, window.innerHeight - 54)}px`;
-
-    menu.innerHTML = `<button id="ctxCopy" title="Copy Code">${useIcon('copy')}</button><button id="ctxDl" title="Download Code">${useIcon('download')}</button>`;
-    document.body.appendChild(menu);
-    activeContextMenu = menu;
-
-    menu.querySelector('#ctxCopy').onclick = async () => {
-      try { await navigator.clipboard.writeText(codeText); } catch(e){}
-      dismissContextMenu();
-    };
-    menu.querySelector('#ctxDl').onclick = async () => {
-      menu.innerHTML = `<span class="green-txt term-font" style="padding:4px 8px;font-size:0.85em;">-- Downloading --</span>`;
-      const filename = await generateLLMFilename(codeText);
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([codeText], { type: 'text/plain' }));
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setTimeout(dismissContextMenu, 1500);
-    };
-  }
-
   function enhanceCodeBlocks(container) {
     container.querySelectorAll('pre').forEach((pre) => {
-      const codeText = pre.querySelector('code')?.textContent || pre.textContent;
-      const snippetKey = codeText.slice(0, 120);
-
       let wrapper = pre.parentElement;
       if (!wrapper || !wrapper.classList.contains('code-block-wrapper')) {
         wrapper = document.createElement('div');
@@ -1419,7 +1381,16 @@
         wrapper.appendChild(pre);
       }
 
-      if (codeText.split('\n').length > 10) {
+      /* The code text is read lazily (at click time) rather than captured
+       * in a closure here, because enhanceCodeBlocks re-runs on every
+       * render frame while a response is still streaming in. A closure
+       * would freeze a truncated mid-stream snapshot. */
+      const readCode = () => wrapper.querySelector('code')?.textContent ?? pre.textContent ?? '';
+
+      /* COLLAPSE / EXPAND BAR FOR LONG BLOCKS */
+      const codeTextNow = readCode();
+      if (codeTextNow.split('\n').length > 10) {
+        const snippetKey = codeTextNow.slice(0, 120);
         const isExpanded = expandedCodeBlocksState.get(snippetKey) === true;
         wrapper.classList.toggle('collapsed', !isExpanded);
 
@@ -1434,18 +1405,46 @@
           expandedCodeBlocksState.set(snippetKey, !collapsed);
           expandBar.innerHTML = !collapsed ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
         };
+      } else {
+        wrapper.classList.remove('collapsed');
+        wrapper.querySelector('.code-expand-bar')?.remove();
       }
 
-      if (!wrapper.dataset.gesturesBound) {
-        wrapper.dataset.gesturesBound = 'true';
-        let startX = 0, startY = 0;
-        wrapper.addEventListener('pointerdown', (e) => { 
-          if (!e.target.closest('.code-expand-bar')) { startX = e.clientX; startY = e.clientY; } 
-        });
-        wrapper.addEventListener('pointerup', (e) => {
-          if (e.target.closest('.code-expand-bar') || Math.hypot(e.clientX - startX, e.clientY - startY) > 8) return;
-          if (!window.getSelection()?.toString().trim()) { e.stopPropagation(); showCodeContextMenu(e.clientX, e.clientY, codeText); }
-        });
+      /* COPY / DOWNLOAD ACTION BUTTONS (bottom-left, matching the app-wide
+       * icon placement philosophy). Idempotent: enhanceCodeBlocks re-runs on
+       * every render frame, so guard against re-creating. */
+      if (!wrapper.querySelector('.code-actions')) {
+        const actions = document.createElement('div');
+        actions.className = 'code-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.title = 'Copy code';
+        copyBtn.setAttribute('aria-label', 'Copy code');
+        copyBtn.innerHTML = useIcon('copy', 14, 14);
+        copyBtn.onclick = async (e) => {
+          e.stopPropagation();
+          try { await navigator.clipboard.writeText(readCode()); } catch (err) {}
+        };
+
+        const dlBtn = document.createElement('button');
+        dlBtn.title = 'Download code';
+        dlBtn.setAttribute('aria-label', 'Download code');
+        dlBtn.innerHTML = useIcon('download', 14, 14);
+        dlBtn.onclick = async (e) => {
+          e.stopPropagation();
+          const code = readCode();
+          dlBtn.innerHTML = `<span class="term-font" style="font-size:0.85em; padding:0 6px;">-- Downloading --</span>`;
+          const filename = await generateLLMFilename(code);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
+          a.download = filename;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          dlBtn.innerHTML = useIcon('download', 14, 14);
+        };
+
+        actions.append(copyBtn, dlBtn);
+        wrapper.appendChild(actions);
       }
     });
   }
