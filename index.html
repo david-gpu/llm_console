@@ -53,20 +53,27 @@
     extraParams:     {}
   };
 
-  /* Inlined raw SVG string for empty state splash screen */
-  const ROBOT_SVG = `<svg width="180" height="180" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg" fill="#2BE060" stroke="#2BE060" shape-rendering="crispEdges">
-  <!-- All solid-fill accents fused into one path: both antennas (tip+stem
-       as a single continuous outline, no internal seam), both ears,
-       both eyes, and the neck. None of these subpaths overlap each other,
-       so merging is purely a seam/element-count win with zero visual change. -->
-  <path d="M40,10 H60 V20 H54 V35 H46 V20 H40 Z M120,10 H140 V20 H134 V35 H126 V20 H120 Z M20,45 H30 V75 H20 Z M150,45 H160 V75 H150 Z M52,48 H72 V68 H52 Z M108,48 H128 V68 H108 Z M85,85 H95 V100 H85 Z" />
-  <rect x="30" y="35" width="120" height="50" fill="none" stroke-width="6" />
-  <path d="M 65 74 H 115" stroke-width="5" stroke-linecap="square" />
-  <rect x="20" y="100" width="140" height="45" fill="none" stroke-width="6" />
-  <rect x="35" y="110" width="110" height="25" fill="#2BE060" fill-opacity="0.2" stroke="none" />
-  <line x1="55" y1="122.5" x2="125" y2="122.5" stroke-width="6" stroke-linecap="square" />
-  <rect x="30" y="150" width="120" height="18" fill="none" stroke-width="5" />
-  <line x1="40" y1="159" x2="140" y2="159" stroke-width="6" stroke-dasharray="12 6" />
+  /* Inlined raw SVG string for empty state splash screen.
+   * Borderless, blocky pixel-art robot: one solid-fill path, no strokes.
+   * Everything is built from filled rectangles; interior details (eyes,
+   * mouth, screen, leg treads) are holes cut via even-odd parity -- the SVG
+   * equivalent of blank cells in a character-cell ASCII drawing. */
+  const ROBOT_SVG = `<svg width="180" height="180" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+  <path fill="#2BE060" fill-rule="evenodd" d="
+    M40,10 H60 V20 H54 V35 H46 V20 H40 Z
+    M120,10 H140 V20 H134 V35 H126 V20 H120 Z
+    M20,45 H30 V75 H20 Z M150,45 H160 V75 H150 Z
+    M85,85 H95 V100 H85 Z
+    M30,35 H150 V85 H30 Z
+    M52,48 H72 V68 H52 Z M108,48 H128 V68 H108 Z
+    M65,71 H115 V77 H65 Z
+    M20,100 H160 V145 H20 Z
+    M35,110 H145 V135 H35 Z
+    M55,120 H125 V126 H55 Z
+    M30,150 H150 V168 H30 Z
+    M52,156 H58 V162 H52 Z M70,156 H76 V162 H70 Z
+    M88,156 H94 V162 H88 Z M106,156 H112 V162 H106 Z
+    M124,156 H130 V162 H124 Z"/>
 </svg>`;
 
   function loadConfig() {
@@ -155,13 +162,22 @@
    * ==========================================================================
    * DESIGN SPECIFICATION & CSS SYSTEM SPEC
    * ==========================================================================
-   * COLOR PALETTE:
-   * --amber-phosphor (#FFAE1A) : Primary color for user-associated input & prompt space.
-   * --amber-dim      (#7A520B) : Dimmed state for disabled user-associated controls.
+   * COLOR PALETTE (monochrome-phosphor logic, per hue family):
+   * AMBER FAMILY  = user-input space (prompts, settings, input bar).
+   * GREEN FAMILY  = system-output space (assistant replies, code, status).
+   * RED FAMILY    = critical alerts, errors, aborted states (rarely seen).
+   *
+   * --amber-phosphor (#FFAE1A) : Primary color for user input & prompt space.
+   * --amber-dim      (#7A520B) : Dimmed user controls & structural lines in amber space.
+   * --amber-panel    (#1A1206) : Panel surfaces in user-input space.
    * --green-phosphor (#2BE060) : Primary color for system/assistant output space.
-   * --green-dim      (#13632B) : Dimmed state for secondary system decorations.
+   * --green-dim      (#13632B) : Dimmed system decorations & structural lines in green space.
+   * --green-panel    (#0F150F) : Panel surfaces in system-output space.
    * --red-phosphor   (#FF4A4A) : Critical alerts, errors, and aborted states.
    * 
+   * There is NO neutral border/gray color: every structural line is the -dim
+   * phosphor of the space it lives in, exactly like a real monochrome CRT.
+   *
    * TYPOGRAPHY & SIZING:
    * Single unified monospace typeface (--font-term) across standard text, inputs, 
    * headers, and code blocks. Base text size set to 19px.
@@ -170,13 +186,13 @@
 
   :root {
     --bg:               #080C08;
-    --panel:            #0F150F;
-    --border:           #1C331C;
     
     --amber-phosphor:   #FFAE1A;
     --amber-dim:        #7A520B;
+    --amber-panel:      #1A1206;
     --green-phosphor:   #2BE060;
     --green-dim:        #13632B;
+    --green-panel:      #0F150F;
     --red-phosphor:     #FF4A4A;
     
     --font-term:        "Courier New", Courier, "Liberation Mono", VT323, Consolas, monospace;
@@ -199,7 +215,7 @@
     overflow: hidden;
   }
 
-  /* FULL-SCREEN 1980s CRT OVERLAY (SCANLINES, SUBPIXELS, VIGNETTE) */
+  /* FULL-SCREEN 1980s CRT OVERLAY (SCANLINES, VIGNETTE) */
   .crt-overlay {
     position: fixed;
     inset: 0;
@@ -214,15 +230,7 @@
         transparent 1px,
         transparent 2px
       ),
-      /* 2. Vertical RGB Subpixel Mask */
-      repeating-linear-gradient(
-        90deg,
-        rgba(255,   0,   0, 0.03),
-        rgba(0,   255,   0, 0.03) 1px,
-        rgba(0,     0, 255, 0.03) 2px,
-        transparent 3px
-      ),
-      /* 3. Outer Edge Vignette */
+      /* 2. Outer Edge Vignette */
       radial-gradient(
         circle at center,
         transparent 75%,
@@ -255,7 +263,7 @@
   @keyframes content-crt-fadeout {
     0%, 50% {
       filter: blur(1.1px) contrast(1.15) brightness(1.1);
-      text-shadow: 0 0 3px currentColor, -1px 0 1px rgba(255, 0, 0, 0.5), 1px 0 1px rgba(0, 255, 0, 0.5);
+      text-shadow: 0 0 3px currentColor, -1px 0 1px rgba(255, 174, 26, 0.5), 1px 0 1px rgba(43, 224, 96, 0.5);
     }
     100% {
       filter: blur(0px) contrast(1) brightness(1);
@@ -282,12 +290,12 @@
     text-align: left !important; 
   }
 
-  /* SPARSE TOP BAR */
+  /* SPARSE TOP BAR (system output space: green family) */
   .statusbar {
     flex: 0 0 auto;
     padding: 8px 14px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
+    background: var(--green-panel);
+    border-bottom: 1px solid var(--green-dim);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -471,7 +479,7 @@
     50%, 100% { opacity: 0; }
   }
 
-  /* INPUT BAR CONTROLS
+  /* INPUT BAR CONTROLS (user input space: amber family)
    * Visibility is driven by JS setting `margin-bottom` to a negative value
    * (see setInputBarHiddenPx below). This shrinks the bar's reserved space
    * in the flex column (so the conversation viewer reclaims that space)
@@ -481,8 +489,8 @@
    * single px value so they always stay in lockstep with the drag. */
   .inputbar {
     flex: 0 0 auto;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
+    border-top: 1px solid var(--amber-dim);
+    background: var(--amber-panel);
     padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
     display: flex;
     align-items: flex-end;
@@ -558,7 +566,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--panel);
+    background: var(--amber-panel);
     border: 1px solid var(--amber-phosphor);
     color: var(--amber-phosphor);
     border-radius: 2px;
@@ -606,7 +614,7 @@
   button.send-img:disabled,
   .attach-btn:disabled {
     color: var(--amber-dim);
-    border-color: var(--border);
+    border-color: var(--amber-dim);
     opacity: 0.7;
     cursor: not-allowed;
   }
@@ -621,7 +629,7 @@
     max-height: 240px;
     max-width: 100%;
     border-radius: 2px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--green-dim);
     cursor: pointer;
     transition: border-color 0.15s;
     object-fit: contain;
@@ -681,7 +689,7 @@
     color: var(--bg);
   }
 
-  /* FULL-SCREEN CONFIG SCREEN OVERLAY */
+  /* FULL-SCREEN CONFIG SCREEN OVERLAY (user input space: amber family) */
   .settings-screen {
     position: fixed;
     inset: 0;
@@ -702,7 +710,7 @@
   .settings-header {
     flex: 0 0 auto;
     padding: 10px 14px;
-    background: var(--panel);
+    background: var(--amber-panel);
     border-bottom: 1px solid var(--amber-phosphor);
     color: var(--amber-phosphor);
     font-size: var(--font-size-base);
@@ -780,7 +788,7 @@
   }
 
   .history-toggle-btn:hover {
-    background: var(--panel);
+    background: var(--amber-dim);
     border-color: var(--amber-phosphor);
   }
 
@@ -790,7 +798,7 @@
     left: 0;
     right: 0;
     z-index: 100;
-    background: var(--panel);
+    background: var(--amber-panel);
     border: 1px solid var(--amber-phosphor);
     max-height: 180px;
     overflow-y: auto;
@@ -804,7 +812,7 @@
     padding: 8px 10px;
     font-size: 0.85em;
     cursor: pointer;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--amber-dim);
   }
 
   .history-item:hover {
@@ -827,8 +835,8 @@
   .settings-footer {
     flex: 0 0 auto;
     padding: 12px 14px;
-    background: var(--panel);
-    border-top: 1px solid var(--border);
+    background: var(--amber-panel);
+    border-top: 1px solid var(--amber-dim);
     display: flex;
     gap: 10px;
   }
@@ -867,7 +875,7 @@
     border-color: var(--amber-phosphor);
   }
 
-  /* MARKDOWN & CODE BLOCKS - UNIFIED TYPEFACE & SIZE */
+  /* MARKDOWN & CODE BLOCKS - UNIFIED TYPEFACE & SIZE (system output: green) */
   .markdown-body {
     font-family: var(--font-term) !important;
     font-size: var(--font-size-base) !important;
@@ -883,8 +891,8 @@
   }
 
   .markdown-body pre {
-    background: var(--panel);
-    border: 1px solid var(--border);
+    background: var(--green-panel);
+    border: 1px solid var(--green-dim);
     border-radius: 2px;
     padding: 12px;
     overflow-x: auto;
@@ -894,8 +902,8 @@
 
   .code-block-wrapper {
     margin: 10px 0;
-    border: 1px solid var(--border);
-    background: var(--panel);
+    border: 1px solid var(--green-dim);
+    background: var(--green-panel);
     position: relative;
   }
 
@@ -911,7 +919,7 @@
     gap: 6px;
     padding: 6px 12px;
     background: var(--bg);
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--green-dim);
     cursor: pointer;
     font-size: 0.75em;
     color: var(--green-phosphor);
@@ -920,9 +928,10 @@
   }
 
   /* CODE BLOCK ACTION BUTTONS (COPY / DOWNLOAD)
-   * Persistent icon buttons pinned to the bottom-left of every code
-   * block, matching the placement and styling philosophy of the
-   * edit-prompt and retry icons. Identical UX on touch and desktop. */
+   * Freestanding icon buttons rendered OUTSIDE the bordered code-block
+   * wrapper, directly below it, matching the placement and styling
+   * philosophy of the edit-prompt and retry icons. Identical UX on touch
+   * and desktop. */
   .code-actions {
     display: flex;
     align-items: center;
@@ -953,18 +962,18 @@
     border-collapse: collapse;
     margin: 8px 0;
     width: 100%;
-    border: 1px solid var(--border);
+    border: 1px solid var(--green-dim);
   }
 
   .markdown-body th,
   .markdown-body td {
-    border: 1px solid var(--border);
+    border: 1px solid var(--green-dim);
     padding: 6px 10px;
     text-align: left;
   }
 
   .markdown-body thead th {
-    background: var(--panel);
+    background: var(--green-panel);
     color: var(--green-phosphor);
   }
 
@@ -972,7 +981,7 @@
   .settings-error {
     flex: 0 0 auto;
     padding: 8px 14px 0;
-    background: var(--panel);
+    background: var(--amber-panel);
   }
 </style>
 </head>
@@ -1461,12 +1470,18 @@
         wrapper.querySelector('.code-expand-bar')?.remove();
       }
 
-      /* COPY / DOWNLOAD ACTION BUTTONS (bottom-left, matching the app-wide
-       * icon placement philosophy). Idempotent: enhanceCodeBlocks re-runs on
-       * every render frame, so guard against re-creating. */
-      if (!wrapper.querySelector('.code-actions')) {
-        const actions = document.createElement('div');
+      /* COPY / DOWNLOAD ACTION BUTTONS. Rendered as a freestanding row
+       * OUTSIDE the bordered code-block wrapper, directly below it,
+       * matching the placement and styling philosophy of the edit-prompt
+       * and retry icons. Idempotent: enhanceCodeBlocks re-runs on every
+       * render frame (and renderMarkdown rebuilds the container's DOM
+       * each time), so the nextElementSibling check guards against
+       * duplicating the row within a single frame. */
+      let actions = wrapper.nextElementSibling;
+      if (!actions || !actions.classList.contains('code-actions')) {
+        actions = document.createElement('div');
         actions.className = 'code-actions';
+        wrapper.parentNode.insertBefore(actions, wrapper.nextSibling);
 
         const copyBtn = document.createElement('button');
         copyBtn.title = 'Copy code';
@@ -1495,7 +1510,6 @@
         };
 
         actions.append(copyBtn, dlBtn);
-        wrapper.appendChild(actions);
       }
     });
   }
