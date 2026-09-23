@@ -888,6 +888,24 @@
     color: var(--green-phosphor);
     text-align: left;
   }
+  
+  /* HYPERLINKS
+   * Monochrome-phosphor terminals have no distinct "link blue": every
+   * link in assistant output renders as the dim green structural color
+   * of the system-output space and brightens to full phosphor on hover,
+   * consistent with all other interactive elements. */
+  .markdown-body a {
+    text-decoration: underline;
+    color: var(--green-dim);
+    text-decoration-color: var(--green-dim);
+  }
+
+  .markdown-body a:hover {
+    text-decoration: underline;
+    color: var(--green-phosphor);
+    text-decoration-color: var(--green-phosphor);
+  }
+
 
   .markdown-body pre,
   .markdown-body code {
@@ -1299,9 +1317,10 @@
 
   /**
    * Generates timestamp + tool-availability suffix for system prompts, so the
-   * model is always told (a) the current date/time and (b) exactly how many
-   * Tavily-backed tool calls (web_search / fetch_web_page) it may make this
-   * turn -- including the case where no tools are configured/allowed at all.
+   * model is always told (a) the current date/time and (b) exactly which tools
+   * it may use this turn -- including the case where no Tavily-backed tools
+   * are configured/allowed at all (the YouTube transcript extractor needs no
+   * API key and therefore remains available even then).
    */
   function getFormattedRuntimeContext() {
     const now = new Date();
@@ -1311,12 +1330,74 @@
     const timeStr = `~${String(now.getHours()).padStart(2,'0')}:00`;
 
     const maxCalls = getMaxTavilyCalls();
-    const toolsEnabled = !!CONFIG?.tavilyApiKey && maxCalls > 0;
-    const toolLine = toolsEnabled
-      ? `Tools: web_search and fetch_web_page are available. You may make up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`
-      : `Tools: none are available or supported this turn. Do not attempt to call any tools (e.g. web_search, fetch_web_page) -- answer from your own knowledge instead.`;
+    const tavilyEnabled = !!CONFIG?.tavilyApiKey && maxCalls > 0;
 
-    return `\n\n[Runtime Context]\nDate: ${dateStr}\nTime: ${timeStr}\n${toolLine}`;
+    let toolLine = `No tools are available this turn.`;
+    if (tavilyEnabled) {
+      toolLine = `Tools get_youtube_transcript, web_search and fetch_web_page are available.\n` +
+        `Use get_youtube_transcript for YouTube videos. NEVER use web_search or fetch_web_page for YouTube.\n` +
+        `Include timestamps with links ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)) in your summaries.\n` +
+        `You may make up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
+    }
+    return `\n\nDate: ${dateStr}\nTime: ${timeStr}\n${toolLine}\n`;
+  }
+
+  /* 
+   * ==========================================================================
+   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL
+   * ==========================================================================
+   */
+  function extractYouTubeVideoId(input) {
+    if (!input) return null;
+    const cleaned = input.trim();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(cleaned)) return cleaned;
+    const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+    return match ? match[1] : cleaned;
+  }
+
+  /*
+   * ==========================================================================
+   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed)
+   * YouTube does not serve Access-Control-Allow-Origin on its pages or its
+   * InnerTube/caption endpoints, so no browser fetch() can ever read the
+   * response body (CORS), regardless of CSP. All YouTube egress therefore
+   * goes through Tavily's server-side extractor. NOTE: this returns the
+   * extracted page content for the watch URL, not a guaranteed verbatim
+   * caption track -- what Tavily's crawler can retrieve is what we get.
+   * ==========================================================================
+   */
+  function extractYouTubeVideoId(input) {
+    if (!input) return null;
+    const cleaned = input.trim();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(cleaned)) return cleaned;
+    const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+    return match ? match[1] : cleaned;
+  }
+
+  async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
+    const videoId = extractYouTubeVideoId(videoInput);
+    if (!videoId) throw new Error("Invalid YouTube Video ID or URL");
+    if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
+
+    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const results = JSON.parse(await executeTavilyExtract([watchUrl], signal));
+    if (!Array.isArray(results) || results.length === 0) {
+      throw new Error("No content returned for the video page.");
+    }
+
+    const content = results
+      .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
+      .filter(Boolean)
+      .join('\n\n');
+    if (!content) throw new Error("Video page was fetched but contained no extractable content.");
+
+    return JSON.stringify({
+      video_id: videoId,
+      language: preferredLang,
+      source: 'tavily_extract',
+      page_url: watchUrl,
+      content
+    });
   }
 
   /* 
@@ -1996,15 +2077,33 @@
       apiMessages.push({ role: 'user', content: fullPayload });
     }
 
-    const toolsEnabled = !!CONFIG.tavilyApiKey && getMaxTavilyCalls() > 0;
+    const tools = [];
+    const tavilyEnabled = !!CONFIG.tavilyApiKey && getMaxTavilyCalls() > 0;
+
+    if (tavilyEnabled) {
+      tools.push(
+        {
+          type: 'function',
+          function: {
+            name: 'get_youtube_transcript',
+            description: 'Retrieves the page content for a given YouTube video URL or Video ID via a server-side extractor. Use this tool for YouTube videos.',
+            parameters: {
+              type: 'object',
+              properties: {
+                video_id: { type: 'string', description: 'The YouTube Video ID or full YouTube video URL.' },
+                language: { type: 'string', description: 'Preferred language code (e.g. "en", "es"). Defaults to "en".' }
+              },
+              required: ['video_id']
+            }
+          }
+        },
+        { type: 'function', function: { name: 'web_search', description: 'Search web. NEVER use this tool for Youtube', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
+        { type: 'function', function: { name: 'fetch_web_page', description: 'Fetch a webpage. NEVER use this tool for Youtube', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } } }
+      );
+    }
+
     const payload = Object.assign(
-      { model: activeModel, messages: apiMessages, stream: true },
-      toolsEnabled ? {
-        tools: [
-          { type: 'function', function: { name: 'web_search', description: 'Search web', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
-          { type: 'function', function: { name: 'fetch_web_page', description: 'Fetch page', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } } }
-        ]
-      } : {},
+      { model: activeModel, messages: apiMessages, stream: true, tools },
       (CONFIG.reasoningEffort && CONFIG.reasoningEffort !== 'none') ? { reasoning_effort: CONFIG.reasoningEffort } : {},
       (CONFIG.serviceTier === 'priority' || CONFIG.serviceTier === 'flex') ? { service_tier: CONFIG.serviceTier } : {},
       CONFIG.extraParams
@@ -2062,7 +2161,7 @@
       if (toolCallList.length > 0) {
         const maxCalls = getMaxTavilyCalls();
         if (toolRoundCount >= maxCalls) {
-          fullText += `\n\n-- MAX TAVILY CALLS REACHED (${maxCalls}). STOPPING TOOL LOOP --`;
+          fullText += `\n\n-- MAX TOOL CALLS REACHED. STOPPING LOOP --`;
           renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
           conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return;
         }
@@ -2073,7 +2172,10 @@
           let resultStr = '';
           try {
             const args = JSON.parse(tc.arguments || '{}');
-            if (tc.name === 'web_search') {
+            if (tc.name === 'get_youtube_transcript') {
+              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- FETCHING YOUTUBE TRANSCRIPT "${escapeHtml(args.video_id || '')}"... --</div>`);
+              resultStr = await fetchYouTubeTranscript(args.video_id, args.language || 'en', signal);
+            } else if (tc.name === 'web_search') {
               renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`);
               resultStr = await executeTavilySearch(args.query, signal);
             } else if (tc.name === 'fetch_web_page') {
@@ -2084,7 +2186,13 @@
             /* A user-initiated abort must tear down the whole turn, not be
              * recorded as a tool error and fed back to the model. */
             if (err.name === 'AbortError') throw err;
-            resultStr = JSON.stringify({ error: err.message });
+            resultStr = JSON.stringify({
+              error: err.message,
+              hint: 'This tool call failed. DO NOT retry the same call with the same arguments. ' +
+                    'Choose whether to answer from what you already know, ' +
+                    'tell the user the Youtube transcript could not be retrieved, ' +
+                    'or try a different tool only if it is going to move things forward.'
+            });
           }
           apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
         }
