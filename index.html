@@ -255,8 +255,13 @@
     animation: overlay-crt-fadeout 4s ease-in-out forwards;
   }
 
-  /* MAIN WRAPPER FOR BLOOM & CHROMATIC ABERRATION */
+  /* MAIN WRAPPER FOR BLOOM & CHROMATIC ABERRATION
+   * position:relative turns this into the containing block for the
+   * absolutely-positioned model-selector dropdown (which must hang BELOW
+   * the status bar and would be clipped by the status bar's own
+   * overflow:hidden if it lived inside it). */
   .crt-screen-content {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: var(--app-height, 100dvh);
@@ -343,6 +348,44 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 0 1 auto;
+    /* The model name doubles as the model-history drop-down toggle. */
+    cursor: pointer;
+    user-select: none;
+  }
+
+  /* MODEL SELECTOR DROP-DOWN (system output space: green family)
+   * Anchored to the top-right of the app column, directly under the status
+   * bar. The vertical offset is set by JS from the status bar's measured
+   * height (top is overwritten at open time), so it tracks any font/padding
+   * change without hardcoding pixels. */
+  .model-dropdown {
+    position: absolute;
+    top: 0; /* overwritten by JS at open time */
+    right: 8px;
+    z-index: 4500;
+    min-width: 240px;
+    max-width: calc(100vw - 16px);
+    max-height: 50vh;
+    overflow-y: auto;
+    background: var(--green-panel);
+    border: 1px solid var(--green-dim);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+  }
+
+  .model-dropdown .history-item {
+    color: var(--green-phosphor);
+    border-bottom: 1px solid var(--green-dim);
+    font-size: 0.85em;
+    word-break: break-all;
+  }
+
+  .model-dropdown .history-item.current {
+    font-weight: bold;
+  }
+
+  .model-dropdown .history-item:hover {
+    background: var(--green-phosphor);
+    color: var(--bg);
   }
 
   /* MAIN CONVERSATION CONTAINER */
@@ -360,13 +403,20 @@
     pointer-events: none;
   }
 
-  /* EMPTY SPLASH STATE */
+  /* EMPTY SPLASH STATE
+   * max-width:100% plus the responsive svg sizing below guarantee the splash
+   * never overflows its column. On narrow phones the old fixed 360px robot
+   * was WIDER than the available content box; an overflowing flex item with
+   * auto margins gets those margins clamped to zero and falls back to
+   * start-alignment, which pushed the whole splash (robot included) a few
+   * pixels to the right of true center. */
   .empty-splash {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     margin: auto;
+    max-width: 100%;
     text-align: center;
     user-select: none;
     opacity: 0.85;
@@ -374,7 +424,8 @@
   }
 
   .empty-splash svg {
-    width: 360px;
+    width: min(360px, 100%); /* shrink instead of overflowing on mobile */
+    max-width: 100%;
     height: auto; /* preserve the robot's 30:32 viewBox aspect ratio */
     margin-bottom: 14px;
   }
@@ -625,6 +676,38 @@
     button.send.stop:not(:disabled):hover,
     button.send-img.stop:not(:disabled):hover {
       background: var(--red-phosphor);
+      color: var(--bg);
+    }
+  }
+
+  /* STICKY-HOVER NEUTRALIZER (TOUCH DEVICES). Some mobile browsers —
+   * notably Firefox on Android — emulate :hover after a tap and leave it
+   * applied until the user taps somewhere else, EVEN THOUGH the
+   * (hover:hover) block above correctly never matched. So on devices
+   * that report no hover capability we explicitly pin :hover to the same
+   * visuals as the resting state. This way, tapping the attach button
+   * while it is active (clearing the pending attachments and removing
+   * .active) can never leave the button visually highlighted through a
+   * stale emulated hover state. */
+  @media (hover: none) {
+    .attach-btn:hover,
+    .gear-btn:hover,
+    button.send:not(:disabled):hover,
+    button.send-img:not(:disabled):hover {
+      background: var(--amber-panel);
+      color: var(--amber-phosphor);
+    }
+
+    button.send.stop:not(:disabled):hover,
+    button.send-img.stop:not(:disabled):hover {
+      background: var(--amber-panel);
+      color: var(--red-phosphor);
+    }
+
+    /* While files ARE still pending, hover must keep showing the active
+     * highlight, not the neutralized resting look. */
+    .attach-btn.active:hover {
+      background: var(--amber-phosphor);
       color: var(--bg);
     }
   }
@@ -920,8 +1003,11 @@
     gap: 10px;
   }
 
+  /* SAVE and CANCEL each take exactly half of the available footer space:
+   * flex-basis 0 with equal positive growth means the free space (minus
+   * the gap) is split 50/50 regardless of each button's label length. */
   .settings-footer button.primary {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     background: var(--amber-phosphor);
     color: var(--bg);
     border: 1px solid var(--amber-phosphor);
@@ -939,7 +1025,7 @@
   }
 
   .settings-footer button.secondary {
-    flex: 0 0 auto;
+    flex: 1 1 0;
     background: transparent;
     color: var(--amber-phosphor);
     border: 1px solid var(--amber-dim);
@@ -1111,8 +1197,13 @@
   <div class="crt-screen-content">
     <div class="statusbar term-font green-txt" id="statusbar">
       <span id="statusHost"></span>
-      <span id="statusModel"></span>
+      <span id="statusModel" title="Tap to switch model"></span>
     </div>
+
+    <!-- MODEL HISTORY DROPDOWN (opened by tapping the model name in the
+         status bar; lives outside the status bar so it is not clipped by
+         the status bar's overflow:hidden, and is positioned by JS). -->
+    <div class="model-dropdown term-font" id="modelDropdown" style="display:none;" role="menu"></div>
 
     <div class="conversation-wrap" id="conversationWrap"></div>
 
@@ -1276,6 +1367,8 @@
   const sendImgBtn = document.getElementById('sendImgBtn');
   const statusHost = document.getElementById('statusHost');
   const statusModel = document.getElementById('statusModel');
+  const statusbarEl = document.getElementById('statusbar');
+  const modelDropdown = document.getElementById('modelDropdown');
   const settingsScreen = document.getElementById('settingsScreen');
   const inputbar = document.getElementById('inputbar');
   const gearBtn = document.getElementById('gearBtn');
@@ -1297,6 +1390,15 @@
    * neither be accidentally aborted nor clobber the live turn's controller. */
   let activeAbortController = null;
   let attachedFiles = [];
+  /* Attachment CONTENT PARTS carried over from an edited (or retried) turn.
+   * Unlike attachedFiles (raw File objects awaiting the picker->send hop),
+   * these are already-built multimodal parts (image data-URLs, wrapped
+   * file-text dumps) extracted from a previous turn's payload. They sit in
+   * the input bar exactly like freshly picked attachments -- the attach
+   * button lights up for them and a tap clears them -- and are re-embedded
+   * into the payload on the next send, so an edited turn keeps its
+   * attachments instead of silently dropping them. */
+  let pendingPayloadParts = [];
   let isProcessing = false;
   let isAutoScrolling = false;
   let conversationMode = null;
@@ -1592,9 +1694,14 @@
     }
   }
 
-  /* Global click-away handler for settings history dropdowns */
+  /* Global click-away handler for settings history dropdowns AND the status
+   * bar model dropdown. */
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.field-history-wrap')) document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
+    if (!e.target.closest('.field-history-wrap') &&
+        !e.target.closest('#statusModel') &&
+        !e.target.closest('#modelDropdown')) {
+      document.querySelectorAll('.history-dropdown, #modelDropdown').forEach(el => el.style.display = 'none');
+    }
   });
 
   function enhanceCodeBlocks(container) {
@@ -1828,19 +1935,90 @@
   function updateStatusBar(activeModel = null) {
     if (!CONFIG) { statusHost.textContent = 'NOT CONFIGURED'; statusModel.textContent = ''; return; }
     statusHost.textContent = extractDomainName(CONFIG.apiHost);
-    statusModel.textContent = (activeModel || CONFIG.model).split('/').pop();
+    /* The model name doubles as the model-history dropdown toggle; the
+     * trailing chevron is the tap affordance. (Built via innerHTML with
+     * escapeHtml on the dynamic part; the SVG comes from our own sprite.) */
+    statusModel.innerHTML = escapeHtml((activeModel || CONFIG.model).split('/').pop()) +
+      ' ' + useIcon('chevronDown', 12, 12);
   }
+
+  /*
+   * ==========================================================================
+   * STATUS BAR MODEL-HISTORY DROPDOWN
+   * Tapping the model name on the top-right opens a drop-down listing every
+   * model that had previously been selected (the same 'model' history store
+   * the settings screen maintains). Selecting an entry switches the active
+   * chat model immediately (persisted to localStorage), so the next turn --
+   * without opening the config screen -- runs against the chosen model.
+   * ==========================================================================
+   */
+  function populateModelDropdown() {
+    modelDropdown.innerHTML = '';
+
+    /* History is the source of truth; the currently configured model is
+     * force-included (at the front) so the active choice is always visible
+     * even if it was never explicitly saved into the history store. */
+    const list = [];
+    if (CONFIG?.model) list.push(CONFIG.model);
+    getHistory('model').forEach(m => { if (!list.includes(m)) list.push(m); });
+
+    if (list.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'history-item term-font';
+      empty.style.cursor = 'default';
+      empty.style.opacity = '0.6';
+      empty.textContent = '< NO MODEL HISTORY >';
+      modelDropdown.appendChild(empty);
+      return;
+    }
+
+    list.forEach(m => {
+      const el = document.createElement('div');
+      el.className = 'history-item term-font';
+      const isCurrent = CONFIG && m === CONFIG.model;
+      if (isCurrent) el.classList.add('current');
+      /* Prompt taxonomy: the active selection is prefixed with '>'. */
+      el.textContent = (isCurrent ? '> ' : '  ') + m;
+      el.title = m;
+      el.onclick = (e) => {
+        e.stopPropagation();
+        if (CONFIG && m !== CONFIG.model) {
+          CONFIG.model = m;
+          saveConfig(CONFIG);
+          updateStatusBar();
+        }
+        modelDropdown.style.display = 'none';
+      };
+      modelDropdown.appendChild(el);
+    });
+  }
+
+  function toggleModelDropdown() {
+    if (!CONFIG) return;
+    if (modelDropdown.style.display === 'block') {
+      modelDropdown.style.display = 'none';
+      return;
+    }
+    populateModelDropdown();
+    /* Anchor directly under the status bar (measured, not hardcoded). */
+    modelDropdown.style.top = statusbarEl.offsetHeight + 'px';
+    modelDropdown.style.display = 'block';
+  }
+
+  statusModel.onclick = (e) => { e.stopPropagation(); toggleModelDropdown(); };
 
   /* FILE ATTACHMENTS
    * No filenames are rendered in the input row (they tend to fill the
    * whole space) — instead the attach button itself is highlighted
-   * ("active") whenever there are pending attachments. Tapping it while
-   * active clears the attachments; tapping it while inactive opens the
-   * file picker. */
+   * ("active") whenever there are pending attachments, whether those are
+   * freshly picked files (attachedFiles) or attachment parts carried over
+   * from an edited/retried turn (pendingPayloadParts). Tapping it while
+   * active clears them; tapping it while inactive opens the file picker. */
   attachBtn.onclick = () => {
     if (conversationMode === 'image') return;
-    if (attachedFiles.length > 0) {
+    if (attachedFiles.length > 0 || pendingPayloadParts.length > 0) {
       attachedFiles = [];
+      pendingPayloadParts = [];
       updateAttachButtonState();
     } else {
       fileInput.click();
@@ -1853,14 +2031,28 @@
   };
 
   function updateAttachButtonState() {
-    attachBtn.classList.toggle('active', attachedFiles.length > 0);
-    attachBtn.title = attachedFiles.length > 0
-      ? `${attachedFiles.length} file(s) attached — tap to clear`
+    const count = attachedFiles.length + pendingPayloadParts.length;
+    attachBtn.classList.toggle('active', count > 0);
+    attachBtn.title = count > 0
+      ? `${count} attachment(s) pending — tap to clear`
       : 'Attach file';
   }
 
-  async function buildMultimodalContent(promptText, files) {
+  /* Extracts the attachment CONTENT PARTS (image_url parts and wrapped
+   * file-text dumps) from a turn's multimodal payload, excluding the
+   * prompt text part. Used to carry attachments across EDIT and RETRY so
+   * they don't fall through the cracks when a turn is re-submitted. */
+  function extractAttachmentParts(payload) {
+    if (!Array.isArray(payload)) return [];
+    return payload.filter(p => p && (p.type === 'image_url' ||
+      (p.type === 'text' && p.text && p.text.startsWith('\n=== FILE:'))));
+  }
+
+  async function buildMultimodalContent(promptText, files, carriedParts = []) {
     const parts = promptText ? [{ type: 'text', text: promptText }] : [];
+    /* Carried parts (from an edited/retried turn) are prepended after the
+     * (possibly re-edited) prompt text, before any newly picked files. */
+    parts.push(...carriedParts);
     for (const file of files) {
       if (file.type.startsWith('image/')) {
         const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
@@ -1991,18 +2183,22 @@
     });
   }
 
-  function createUserMessage(text) {
+  /* carriedParts = the attachment content parts extracted from the turn's
+   * payload (see extractAttachmentParts). They are passed along to the edit
+   * handler so that editing the prompt later does NOT discard the
+   * attachments the turn carried. */
+  function createUserMessage(text, carriedParts = []) {
     document.getElementById('emptySplash')?.remove();
     removeScrollSpacer();
 
     const div = document.createElement('div');
     div.className = 'message user term-font';
     div.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(text)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
-    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(text, div);
+    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(text, div, carriedParts);
     conversationWrap.appendChild(div);
   }
 
-  function editLastPrompt(text, userMsgDiv) {
+  function editLastPrompt(text, userMsgDiv, carriedParts = []) {
     if (isProcessing) return;
     const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
     const uIdx = allUserMsgs.indexOf(userMsgDiv);
@@ -2015,6 +2211,15 @@
 
     const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
     lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
+
+    /* The edited turn's attachments are carried over into the input bar as
+     * ready-made payload parts (assignment, not concat: editing a different
+     * turn replaces, not accumulates). They will be re-embedded into the
+     * new payload on the next send, so the attachment survives the edit
+     * instead of falling through the cracks. The attach button lights up
+     * to reflect them, and a tap on it clears them (deliberate discard). */
+    pendingPayloadParts = carriedParts.slice();
+    updateAttachButtonState();
 
     if (conversationHistory.length === 0) {
       conversationMode = null; attachedFiles = [];
@@ -2379,6 +2584,12 @@
    * that turn's user message, then resends the same prompt/payload. This
    * discards that turn and any turns that came after it, mirroring what a
    * fresh send of that same prompt would produce.
+   *
+   * ATTACHMENT PRESERVATION: the original fullPayload (which embeds the
+   * turn's attachments) is resent as-is, so the retry itself keeps the
+   * attachments. The recreated user message is also given the extracted
+   * attachment parts, so a subsequent EDIT of the retried turn keeps them
+   * too (no falling through the cracks, edit after retry).
    */
   async function retryTurn(assistantDiv, isImage, displayPrompt, fullPayload) {
     if (isProcessing) return;
@@ -2401,7 +2612,7 @@
     try {
       setLoading(isImage ? sendImgBtn : sendBtn);
       await dismissKeyboard();
-      createUserMessage(displayPrompt);
+      createUserMessage(displayPrompt, extractAttachmentParts(fullPayload));
       const newEl = createAssistantContainer();
       if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal);
       else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal);
@@ -2413,22 +2624,27 @@
   async function sendPrompt() {
     if (isProcessing) return;
     const prompt = promptInput.value.trim();
-    if ((!prompt && attachedFiles.length === 0) || !CONFIG) return;
+    /* A send is valid with text, freshly picked files, OR attachment parts
+     * carried over from an edited turn (an edited attachment-only turn has
+     * empty prompt text but must still be re-submittable). */
+    if ((!prompt && attachedFiles.length === 0 && pendingPayloadParts.length === 0) || !CONFIG) return;
 
     promptInput.value = ''; autoGrow(); lockConversationMode('chat'); isProcessing = true;
     activeAbortController = new AbortController();
     try {
-      const fullPayload = await buildMultimodalContent(prompt, attachedFiles);
-      /* Attachments are embedded into this turn's message content, which is
+      const fullPayload = await buildMultimodalContent(prompt, attachedFiles, pendingPayloadParts);
+      /* Attachments (both freshly picked files and parts carried over from
+       * an edited turn) are embedded into this turn's message content, which is
        * itself stored in conversationHistory and resent as part of the full
        * thread on every subsequent turn. So there's no need to keep them
-       * around in attachedFiles to be re-embedded again on the next send. */
+       * around in the input bar to be re-embedded again on the next send. */
       attachedFiles = [];
+      pendingPayloadParts = [];
       updateAttachButtonState();
       setLoading(sendBtn);
       await dismissKeyboard();
       const displayPrompt = prompt || '-- files attached --';
-      createUserMessage(displayPrompt);
+      createUserMessage(displayPrompt, extractAttachmentParts(fullPayload));
       await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal);
     } finally { 
       isProcessing = false; 
@@ -2607,6 +2823,10 @@
     if (!prompt || !CONFIG) return;
 
     promptInput.value = ''; autoGrow(); lockConversationMode('image'); isProcessing = true;
+    /* Attachments never apply to image mode; drop any that were carried
+     * over from an edited turn so they cannot leak into a later chat send. */
+    pendingPayloadParts = [];
+    updateAttachButtonState();
     activeAbortController = new AbortController();
     try {
       setLoading(sendImgBtn); await dismissKeyboard(); createUserMessage(prompt);
