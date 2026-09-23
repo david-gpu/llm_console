@@ -2063,43 +2063,47 @@
     container.parentElement.appendChild(btn);
   }
 
-  /*
-   * ==========================================================================
+  /* ==========================================================================
    * READ-ALOUD (TTS) SUBSYSTEM — Qwen/Qwen3-TTS via DeepInfra
    * ==========================================================================
    * Two-stage pipeline, mirroring the generateLLMFilename philosophy:
    *
    *   Stage 1 (LLM text prep): a separate one-off conversation with the
    *   configured chat model transforms the RAW MARKDOWN reply into clean,
-   *   speakable prose (code fences and tables summarized, link URLs
-   *   dropped, markdown syntax stripped). It runs after the turn is over
-   *   and owns its own private abort controller, so switching targets can
-   *   cancel an in-flight synthesis without touching the turn's handle.
+   *   speakable prose. It runs after the turn is over and owns its own
+   *   private abort controller, so switching targets can cancel an
+   *   in-flight synthesis without touching the turn's handle.
    *
    *   Stage 2 (synthesis): POST to the OpenAI-compatible v1/audio/speech
    *   endpoint on the SAME api host (hardcoded model Qwen/Qwen3-TTS),
-   *   buffered (non-streamed), compressed output (mp3). The response body
-   *   is raw binary audio, so a plain res.blob() is the whole parsing
-   *   story -- no envelope-unwrapping needed.
+   *   requested as RAW PCM (16-bit signed LE, mono, 24 kHz). DeepInfra
+   *   emits the response body progressively (~97ms first byte), so we
+   *   consume res.body as a ReadableStream and schedule each chunk onto
+   *   a Web Audio AudioContext as it arrives -- playback starts with the
+   *   first network packet instead of after the full synthesis. When the
+   *   stream completes, the accumulated PCM is wrapped with a WAV header
+   *   and cached, so replays/resumes keep the zero-cost semantics below.
    *
-   * CACHING: the synthesized audio blob (object URL + Audio element) is
-   * cached per-message in a WeakMap keyed by the response container.
-   * Pausing or switching messages does NOT revoke the blob: a later tap
-   * resumes from the exact paused position with zero new API charges.
-   * Only one message speaks at a time; starting a new one pauses the old.
+   * CACHING: the completed audio (WAV blob URL + Audio element) is cached
+   * per-message in a WeakMap keyed by the response container. A re-tap of
+   * an already-finished message plays the cached WAV from the start with
+   * zero new API charges. Only one message speaks at a time; starting a
+   * new one stops the old (an in-flight STREAM is aborted and discarded,
+   * as before -- only fully-downloaded audio is ever cached).
    * ==========================================================================
    */
   const TTS_MODEL_ID = 'Qwen/Qwen3-TTS';
   const TTS_MAX_CHARS = 16000; /* hardcoded cost guardrail */
+  const TTS_PCM_RATE = 24000;  /* Qwen3-TTS PCM: 16-bit signed LE, mono */
 
   /* Per-message audio cache: contentEl -> { audio, blobUrl }. WeakMap so it
    * dies with the DOM node when a turn is edited/retried away. */
   const ttsAudioCache = new WeakMap();
 
-  /* The message currently fetching or playing: { contentEl, controller }.
-   * controller is only set during the fetch phase; playing audio has no
-   * in-flight request to abort (pause() is instant and local). */
-  let activeTts = { contentEl: null, controller: null };
+  /* The message currently fetching or playing:
+   * { contentEl, controller, player }. controller covers the fetch phase;
+   * player (a live PCM stream session) covers the streaming-play phase. */
+  let activeTts = { contentEl: null, controller: null, player: null };
 
   function speakBtnOf(contentEl) {
     return contentEl?.parentElement?.querySelector('.speak-btn') || null;
@@ -2115,10 +2119,84 @@
   }
 
   /**
+   * Wraps accumulated raw PCM chunks (s16le mono) in a 44-byte WAV header
+   * so the standard <audio> element -- and thus the existing cache/pause
+   * machinery -- can play them like any other file.
+   */
+  function pcmChunksToWavBlob(chunks, sampleRate) {
+    const dataLen = chunks.reduce((n, c) => n + c.byteLength, 0);
+    const buf = new ArrayBuffer(44 + dataLen);
+    const dv = new DataView(buf);
+    const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+    writeStr(0, 'RIFF'); dv.setUint32(4, 36 + dataLen, true); writeStr(8, 'WAVE');
+    writeStr(12, 'fmt '); dv.setUint32(16, 16, true);   /* fmt chunk size   */
+    dv.setUint16(20, 1, true);                          /* PCM              */
+    dv.setUint16(22, 1, true);                          /* mono              */
+    dv.setUint32(24, sampleRate, true);
+    dv.setUint32(28, sampleRate * 2, true);             /* byte rate        */
+    dv.setUint16(32, 2, true);                          /* block align      */
+    dv.setUint16(34, 16, true);                         /* bits per sample  */
+    writeStr(36, 'data'); dv.setUint32(40, dataLen, true);
+    let off = 44;
+    for (const c of chunks) { new Uint8Array(buf, off).set(c); off += c.byteLength; }
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  /**
+   * A live PCM playback session. Chunks arriving off the network are
+   * converted to AudioBuffers and scheduled back-to-back on the shared
+   * AudioContext timeline, so the very first packet is audible ~instantly.
+   *
+   * pause() = ctx.suspend(): the audio timeline (and currentTime) freeze,
+   * scheduled nodes hold, and resume() continues from the exact sample --
+   * which preserves the "pause/resume keeps position" contract for the
+   * streaming phase just as audio.pause() does for the cached phase.
+   */
+  function createPcmStreamPlayer(ctx) {
+    let nextTime = 0;        /* timeline position for the next chunk       */
+    let tail = new Uint8Array(0); /* bytes of a split 16-bit sample       */
+    let lastNode = null, finished = false, stopped = false, started = false;
+    const player = {
+      paused: false,
+      onplaying: null, onpaused: null, onended: null,
+      push(bytes) {
+        if (stopped) return;
+        /* Merge any split-sample remainder, keep whole 16-bit frames. */
+        const all = new Uint8Array(tail.length + bytes.byteLength);
+        all.set(tail); all.set(new Uint8Array(bytes), tail.length);
+        const even = all.length & ~1;
+        const usable = all.subarray(0, even);
+        tail = all.slice(even);
+        const n = usable.length >> 1;
+        if (!n) return;
+        const dv = new DataView(usable.buffer, usable.byteOffset, even);
+        const f32 = new Float32Array(n);
+        for (let i = 0; i < n; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
+        const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+        buf.copyToChannel(f32, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const startAt = Math.max(nextTime, ctx.currentTime); /* no gaps */
+        src.start(startAt);
+        nextTime = startAt + buf.duration;
+        src.connect(ctx.destination);
+        lastNode = src;
+        src.onended = () => {
+          if (finished && !stopped && src === lastNode) player.onended?.();
+        };
+        if (!started && !player.paused) { started = true; player.onplaying?.(); }
+      },
+      finish() { finished = true; if (!lastNode && !stopped) player.onended?.(); },
+      pause()  { if (!stopped) { player.paused = true;  ctx.suspend(); player.onpaused?.();  } },
+      resume() { if (!stopped) { player.paused = false; ctx.resume();  player.onplaying?.(); } },
+      stop()   { if (!stopped) { stopped = true; try { ctx.close(); } catch {} } }
+    };
+    return player;
+  }
+
+  /**
    * Stage 1: asks the configured chat model to rewrite the raw markdown
-   * reply as plain speakable text. Semantically-informed cleanup beats
-   * regex-stripping: the model can summarize code instead of merely
-   * deleting it, and it fixes up truncated aborts sensibly.
+   * reply as plain speakable text. (Unchanged from the buffered version.)
    */
   async function prepareTtsText(rawMarkdown, signal) {
     const res = await apiFetch(CONFIG.apiPath, {
@@ -2135,7 +2213,8 @@
             '3. Replace code blocks with a brief description of what they do.\n' +
             '4. Transform tables into readable prose. Highlight the differences.\n' +
             '5. Preserve the original language and all substantive information.\n' +
-            '6. Output ONLY the speakable text, without preambles or anything else.' },
+            '6. Skip YouTube boilerplate, such as view counts and timestamps.\n' +
+            '7. Output ONLY the text to be read aloud, without preambles or anything else.' },
         { role: 'user', content: rawMarkdown },
         { service_tier: 'priority' }
       ]
@@ -2150,28 +2229,31 @@
   }
 
   /**
-   * Stops whatever message is currently fetching or playing. Pausing (not
-   * resetting) preserves currentTime, and the cached blobUrl survives, so
-   * resuming that message later costs nothing. An in-flight fetch is
-   * aborted outright — nothing was synthesized yet, so nothing is lost.
+   * Stops whatever message is currently fetching or playing. An in-flight
+   * stream is aborted AND its playback session torn down -- nothing was
+   * fully downloaded, so nothing is cached (same contract as before).
+   * A finished message keeps its cached WAV for later free replay.
    */
   function stopActiveTts() {
     if (!activeTts.contentEl) return;
     if (activeTts.controller) activeTts.controller.abort();
+    if (activeTts.player) activeTts.player.stop();
     const entry = ttsAudioCache.get(activeTts.contentEl);
     if (entry?.audio) entry.audio.pause();
     setSpeakIcon(activeTts.contentEl, 'idle');
-    activeTts = { contentEl: null, controller: null };
+    activeTts = { contentEl: null, controller: null, player: null };
   }
 
   /**
    * Speaker-icon tap handler. Three cases:
-   *  1. This message is already active -> pure pause/resume toggle on the
-   *     cached audio (no API traffic at all).
-   *  2. Cached blob exists (previously synthesized) -> instant resume from
-   *     the paused position (no API traffic).
-   *  3. Nothing cached -> full pipeline: LLM text prep, then TTS synthesis,
-   *     then playback. The button blinks (busy) and ignores taps meanwhile.
+   *  1. This message is already active -> pause/resume toggle, on the live
+   *     PCM stream while still downloading, or on the cached audio after.
+   *  2. Cached WAV exists (stream finished earlier) -> instant replay,
+   *     no API traffic.
+   *  3. Nothing cached -> full pipeline: LLM text prep, then STREAMING TTS
+   *     synthesis (audio starts as the first PCM packet lands, long
+   *     before the response completes). When the download finishes the
+   *     WAV is cached for free replays.
    */
   async function toggleSpeak(contentEl, rawMarkdown) {
     if (!CONFIG || !contentEl) return;
@@ -2180,8 +2262,10 @@
     /* Case 1: pause/resume toggle. */
     if (activeTts.contentEl === contentEl) {
       const entry = ttsAudioCache.get(contentEl);
-      if (entry?.audio) {
-        if (entry.audio.paused) entry.audio.play(); else entry.audio.pause();
+      if (activeTts.player) {
+        activeTts.player.paused ? activeTts.player.resume() : activeTts.player.pause();
+      } else if (entry?.audio) {
+        entry.audio.paused ? entry.audio.play() : entry.audio.pause();
       }
       return;
     }
@@ -2192,12 +2276,32 @@
     activeTts.contentEl = contentEl;
     const controller = new AbortController();
     activeTts.controller = controller;
+    let player = null;
 
     let entry = ttsAudioCache.get(contentEl);
     try {
       /* Case 3: full pipeline (only when no cached audio). */
       if (!entry?.blobUrl) {
         setSpeakIcon(contentEl, 'busy');
+
+        /* Create + unlock the AudioContext synchronously inside the click
+         * gesture, BEFORE any awaits, so autoplay policy never blocks the
+         * later (async) playback start. 24 kHz matches the PCM stream, so
+         * no resampling happens in the browser. */
+        const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
+        ctx.resume();
+        player = createPcmStreamPlayer(ctx);
+        activeTts.player = player;
+        player.onplaying = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
+        player.onpaused  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
+        player.onended   = () => {
+          player.stop(); /* playback drained: close the AudioContext */
+          if (activeTts.contentEl === contentEl) {
+            activeTts = { contentEl: null, controller: null, player: null };
+            setSpeakIcon(contentEl, 'idle');
+          }
+        };
+
         const spokenText = await prepareTtsText(rawMarkdown, controller.signal);
         const res = await apiFetch('v1/audio/speech', {
           model: TTS_MODEL_ID,
@@ -2205,28 +2309,47 @@
           voice: CONFIG.ttsVoice,
           language: 'Auto',
           instruct: CONFIG.ttsInstruct,
-          response_format: 'mp3'
+          response_format: 'pcm', /* raw 16-bit LE mono @ 24 kHz: streams */
+          service_tier: 'priority'
         }, controller.signal);
         if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Speech synthesis failed');
+        if (!res.body) throw new Error('Audio streaming is not supported by this transport');
 
-        const blobUrl = URL.createObjectURL(await res.blob());
+        /* Consume the PCM body progressively: each network chunk becomes
+         * audible immediately; playback is already running while the
+         * server is still synthesizing the rest of the text. */
+        const reader = res.body.getReader();
+        const chunks = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          player.push(value);
+        }
+        player.finish();
+        if (!chunks.length) throw new Error('Speech synthesis returned no audio');
+
+        /* Stream complete: wrap the PCM in a WAV header and cache it, so
+         * every future tap of this message replays for free (case 2). */
+        const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(chunks, TTS_PCM_RATE));
         const audio = new Audio(blobUrl);
         audio.onplay = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
         audio.onpause = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
         audio.onended = () => {
           audio.currentTime = 0; /* so a re-tap replays from the start */
-          if (activeTts.contentEl === contentEl) { activeTts.contentEl = null; setSpeakIcon(contentEl, 'idle'); }
+          if (activeTts.contentEl === contentEl) { activeTts = { contentEl: null, controller: null, player: null }; setSpeakIcon(contentEl, 'idle'); }
         };
         entry = { audio, blobUrl };
         ttsAudioCache.set(contentEl, entry);
+        return; /* keep playing via the live stream; the cache is ready */
       }
 
-      /* Case 2 / end of case 3: play (or resume) the cached audio. */
+      /* Case 2: replay the cached WAV. */
       await entry.audio.play();
     } catch (err) {
+      player?.stop();
       if (activeTts.contentEl === contentEl) {
-        activeTts.contentEl = null;
-        activeTts.controller = null;
+        activeTts = { contentEl: null, controller: null, player: null };
         setSpeakIcon(contentEl, 'idle');
         /* An AbortError here means another message's speak button took
          * over and cancelled this fetch -- nothing to report. */
@@ -2236,10 +2359,7 @@
   }
 
   /**
-   * Adds the read-aloud icon button next to the retry button, whenever a
-   * retryable text response is finalized (completed, aborted-with-content,
-   * or tool-loop cap reached). NOT added to image replies (nothing to say)
-   * or to bare error stubs (an error message is not worth narrating).
+   * Adds the read-aloud icon button next to the retry button. (Unchanged.)
    */
   function addSpeakButton(contentEl, rawMarkdown) {
     if (!contentEl?.parentElement || !rawMarkdown) return;
