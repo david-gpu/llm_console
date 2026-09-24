@@ -1284,7 +1284,7 @@
           <div class="field">
             <label for="field-model">Default Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-model" class="term-font" placeholder="deepseek-ai/DeepSeek-V4-Pro-0813">
+              <input type="text" id="field-model" class="term-font" placeholder="zai-org/GLM-5.3">
               <button type="button" class="history-toggle-btn" data-key="model" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-model" style="display:none;"></div>
             </div>
@@ -1347,14 +1347,14 @@
           <div class="field">
             <label for="field-ttsVoice">TTS Voice (model: Qwen/Qwen3-TTS)</label>
             <select id="field-ttsVoice" class="term-font">
-              <option value="Ono_Anna">Anna: Japanese woman</option>
               <option value="Aiden">Aiden: American man</option>
+              <option value="Ono_Anna">Anna: Japanese woman</option>
               <option value="Ryan">Ryan: British man</option>
             </select>
           </div>
           <div class="field">
             <label for="field-ttsInstruct">TTS Instruct (tone / style)</label>
-            <input type="text" id="field-ttsInstruct" class="term-font" placeholder="Friendly Canadian">
+            <input type="text" id="field-ttsInstruct" class="term-font" placeholder="Friendly and relaxed">
           </div>
           <div class="field">
             <label for="field-systemPrompt">System Prompt</label>
@@ -1554,7 +1554,7 @@
     if (now.getMinutes() >= 30) now.setHours(now.getHours() + 1);
     now.setMinutes(0, 0, 0);
     const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-    const timeStr = `~${String(now.getHours()).padStart(2,'0')}:00`;
+    const timeStr = `Approximately ${String(now.getHours()).padStart(2,'0')}:00`;
 
     const maxCalls = getMaxTavilyCalls();
     const tavilyEnabled = !!CONFIG?.tavilyApiKey && maxCalls > 0;
@@ -1567,9 +1567,14 @@
         `or boilerplate like the channel's name or the number of views. Start right away with the meat of it.\n` +
         `The summaries must be written in plain prose that is well-suited to be read aloud by a TTS engine. ` +
         `Include timestamps with links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n` +
-        `You may make up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
+        `You may perform up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
     }
-    return `\n\nDate: ${dateStr}\nTime: ${timeStr}\n${toolLine}\n`;
+    return `# System Baseline Configuration\n` +
+           `Date: ${dateStr}\n` +
+           `Time: ${timeStr}\n\n` +
+           `# Available Tools\n` +
+           `${toolLine}\n\n` +
+           `# User's Instructions\n`;
   }
 
   /*
@@ -2778,7 +2783,7 @@
     let apiMessages = existingApiMessages;
     if (!apiMessages) {
       conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt });
-      apiMessages = [{ role: 'system', content: CONFIG.systemPrompt + getFormattedRuntimeContext() }];
+      apiMessages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt}];
       for (let i = 0; i < conversationHistory.length - 1; i++) {
         const item = conversationHistory[i];
         apiMessages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
