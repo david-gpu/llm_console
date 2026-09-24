@@ -2859,9 +2859,17 @@
       const reader = res.body.getReader(), decoder = new TextDecoder();
       let buffer = '';
 
+      /* Direct stream teardown on abort: fetch-signal propagation to the
+       * body reader is not reliable in all engines (legacy Safari, some
+       * webviews), so abort also cancels the ReadableStream directly.
+       * reader.cancel() resolves the pending read() as {done:true} instead
+       * of rejecting, hence the signal.aborted check after the loop. */
+      const abortStream = () => { try { reader.cancel(); } catch (e) {} };
+      signal.addEventListener('abort', abortStream);
+
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || signal.aborted) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || '';
@@ -2921,7 +2929,14 @@
           } catch (e) {}
         }
       }
+      signal.removeEventListener('abort', abortStream);
 
+      /* A cancelled stream ends "cleanly"; re-raise as an AbortError so the
+       * existing catch branch (finalizeStoppedResponse + resetInput) runs. */
+      if (signal.aborted) {
+        const e = new Error('Aborted'); e.name = 'AbortError'; throw e;
+      }
+      
       const toolCallList = Object.values(accumulatedToolCalls);
       if (toolCallList.length > 0) {
         const maxCalls = getMaxTavilyCalls();
