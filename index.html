@@ -2512,8 +2512,8 @@
   async function prepareTtsText(rawMarkdown, signal) {
     const res = await apiFetch(CONFIG.apiPath, {
       model: CONFIG.model,
-      reasoning_effort: 'none',
-      service_tier: 'priority',
+      reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions, instead of following them */
+      service_tier: 'priority', /* To reduce latency */
       stream: false,
       temperature: 0.1,
       messages: [
@@ -2521,13 +2521,12 @@
             'Transform the given Markdown input ' +
             'into plain prose that is perfectly suited to be read aloud by a TTS engine.\n' +
             'Guidelines:\n' +
-            '1. Avoid all Markdown syntax, emojis, and unreadable symbols like bullet points.\n' +
+            '1. Do not output any Markdown syntax, emojis, or unreadable symbols like bullet points.\n' +
             '2. When you encounter a link, simply output the link text, ignoring URLs.\n' +
-            '3. Replace code blocks with a brief description of what they do.\n' +
-            '4. Transform tables into readable prose. Highlight the differences.\n' +
+            '3. Replace code blocks with a brief description of the contents.\n' +
+            '4. Transform tables into readable prose. Highlight the differences between cells.\n' +
             '5. Preserve the original language and all substantive information.\n' +
-            '6. Skip YouTube boilerplate, such as view counts and timestamps.\n' +
-            '7. Output ONLY the text to be read aloud, without preambles or anything else.' },
+            '6. Output ONLY the text to be read aloud, without preambles or anything else.' },
         { role: 'user', content: rawMarkdown }
       ]
     }, signal);
@@ -2622,7 +2621,7 @@
           language: 'Auto',
           instruct: CONFIG.ttsInstruct,
           response_format: 'pcm', /* raw 16-bit LE mono @ 24 kHz: streams */
-          service_tier: 'priority'
+          service_tier: 'priority' /* to reduce latency */
         }, controller.signal);
         if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Speech synthesis failed');
         if (!res.body) throw new Error('Audio streaming is not supported by this transport');
