@@ -2205,20 +2205,28 @@
 
   let lastScrollTop = 0;
   conversationWrap.addEventListener('scroll', () => {
-    if (isAutoScrolling || isProcessing) return;
     const st = conversationWrap.scrollTop;
-    const maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight;
     const diff = st - lastScrollTop;
+    /* Always refresh the reference point, even when we bail out below.
+     * The old code skipped this while a turn was streaming, so by the time
+     * the turn ended, lastScrollTop still held the pre-send scroll offset.
+     * The first small gesture after the turn was then measured against
+     * that stale value, producing a "diff" of hundreds of pixels and
+     * slamming the input bar fully off-screen in a single frame. */
     lastScrollTop = Math.max(0, st);
+  
+    if (isAutoScrolling || isProcessing) return;
+  
+    const maxScroll = conversationWrap.scrollHeight - conversationWrap.clientHeight;
     if (!diff) return;
-
+  
     /* diff > 0: content scrolling toward the bottom (dragging up) -> reveal.
      * diff < 0: content scrolling toward the top (dragging down) -> hide.
      * Every pixel of scroll maps 1:1 to the bar's hidden amount, with no
      * dead-zone/threshold, so the response is identical whether the drag
      * is slow or fast. Never eased while tracking a drag. */
     setInputBarHiddenPx(inputBarHiddenPx - diff, false);
-
+  
     /* Always land fully visible once caught up to the latest message. */
     if (st >= maxScroll - 4) setInputBarHiddenPx(0, false);
   });
@@ -2298,20 +2306,50 @@
     conversationWrap.appendChild(div);
   }
 
-  function editLastPrompt(text, userMsgDiv, carriedParts = []) {
-    if (isProcessing) return;
+  /* Bounded wait until the current turn's teardown has fully finished
+   * (isProcessing back to false). Used by editLastPrompt after it aborts
+   * a live stream: the turn's own AbortError path still has work to do
+   * (finalizeStoppedResponse, partial-history push, resetInput) and we
+   * must not race it. */
+  async function waitForTurnEnd(maxWaitMs = 4000) {
+    const start = Date.now();
+    while (isProcessing && (Date.now() - start) < maxWaitMs) {
+      await new Promise(r => setTimeout(r, 30));
+    }
+    return !isProcessing;
+  }
+
+  /* carriedParts = the attachment content parts extracted from the turn's
+   * payload (see extractAttachmentParts). They are passed along to the edit
+   * handler so that editing the prompt later does NOT discard the
+   * attachments the turn carried. */
+  async function editLastPrompt(text, userMsgDiv, carriedParts = []) {
+    /* EDIT DURING A LIVE TURN = "stop and edit". The old behavior bailed
+     * out entirely while isProcessing was true which, combined with the
+     * input bar being unreachable mid-stream, left the user with no way
+     * to interrupt a long thinking phase. Now we abort the stream first,
+     * then WAIT for the turn's own teardown to complete before touching
+     * the DOM or conversationHistory. The wait is bounded: if teardown
+     * somehow never finishes, we refuse the edit rather than corrupt
+     * state by racing it. */
+    if (isProcessing) {
+      if (activeAbortController) activeAbortController.abort();
+      const settled = await waitForTurnEnd();
+      if (!settled) return;
+    }
+  
     const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
     const uIdx = allUserMsgs.indexOf(userMsgDiv);
-
+  
     let next = userMsgDiv.nextElementSibling;
     while (next) { const r = next; next = next.nextElementSibling; r.remove(); }
     userMsgDiv.remove();
-
+  
     if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
-
+  
     const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
     lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
-
+  
     /* The edited turn's attachments are carried over into the input bar as
      * ready-made payload parts (assignment, not concat: editing a different
      * turn replaces, not accumulates). They will be re-embedded into the
@@ -2320,13 +2358,13 @@
      * to reflect them, and a tap on it clears them (deliberate discard). */
     pendingPayloadParts = carriedParts.slice();
     updateAttachButtonState();
-
+  
     if (conversationHistory.length === 0) {
       conversationMode = null; attachedFiles = [];
       updateAttachButtonState(); sendBtn.disabled = false; sendImgBtn.disabled = false; attachBtn.disabled = false;
       checkEmptyState();
     }
-
+  
     promptInput.value = text; autoGrow(); promptInput.focus();
   }
 
@@ -2347,11 +2385,18 @@
   }
 
   function setLoading(btnToStop) {
+    /* A live turn is the one moment the user genuinely NEEDS the input bar
+     * on screen: the stop button lives there. Pin it fully visible for the
+     * whole turn. The scroll listener already ignores gestures while
+     * isProcessing is true, so without this the bar would stay stuck at
+     * whatever hidden offset it was at when the turn began, leaving the
+     * stop control unreachable until the stream finished on its own. */
+    showInputBar(true);
     const target = btnToStop || sendBtn;
     target.disabled = false;
     target.innerHTML = useIcon('stop', 14, 14);
     target.classList.add('stop');
-    promptInput.disabled = true; 
+    promptInput.disabled = true;
     attachBtn.disabled = true;
   }
 
