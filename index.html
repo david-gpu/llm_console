@@ -1563,7 +1563,10 @@
     if (tavilyEnabled) {
       toolLine = `Tools get_youtube_transcript, web_search and fetch_web_page are available.\n` +
         `Use get_youtube_transcript for YouTube videos. NEVER use web_search or fetch_web_page for YouTube.\n` +
-        `Include timestamps with links ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)) in your summaries.\n` +
+        `Your summaries of YouTube videos should be free of introductions like 'This video is...' ` +
+        `or boilerplate like the channel's name or the number of views. Start right away with the meat of it.\n` +
+        `The summaries must be written in plain prose that is well-suited to be read aloud by a TTS engine. ` +
+        `Include timestamps with links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n` +
         `You may make up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
     }
     return `\n\nDate: ${dateStr}\nTime: ${timeStr}\n${toolLine}\n`;
@@ -1745,6 +1748,7 @@
       const res = await apiFetch(CONFIG.apiPath, {
         model: CONFIG.model,
         reasoning_effort: 'low',
+        service_tier: 'priority',
         temperature: 0.1,
         max_tokens: 25,
         stream: false,
@@ -1761,8 +1765,7 @@
               '4. If unsure, output: snippet.txt\n' +
               'Example input: a Python function implementing merge sort\n' +
               'Example output: merge-sort.py' },
-          { role: 'user', content: codeText.slice(0, 2048) },
-          { service_tier: 'priority' }
+          { role: 'user', content: codeText.slice(0, 2048) }
         ]
       });
       if (!res.ok) return 'snippet.txt';
@@ -2504,12 +2507,14 @@
   async function prepareTtsText(rawMarkdown, signal) {
     const res = await apiFetch(CONFIG.apiPath, {
       model: CONFIG.model,
+      reasoning_effort: 'none',
+      service_tier: 'priority',
       stream: false,
       temperature: 0.1,
       messages: [
         { role: 'system', content:
             'Transform the given Markdown input ' +
-            'into plain prose that is perfectly suited to be read by aloud by a TTS engine.\n' +
+            'into plain prose that is perfectly suited to be read aloud by a TTS engine.\n' +
             'Guidelines:\n' +
             '1. Avoid all Markdown syntax, emojis, and unreadable symbols like bullet points.\n' +
             '2. When you encounter a link, simply output the link text, ignoring URLs.\n' +
@@ -2518,8 +2523,7 @@
             '5. Preserve the original language and all substantive information.\n' +
             '6. Skip YouTube boilerplate, such as view counts and timestamps.\n' +
             '7. Output ONLY the text to be read aloud, without preambles or anything else.' },
-        { role: 'user', content: rawMarkdown },
-        { service_tier: 'priority' }
+        { role: 'user', content: rawMarkdown }
       ]
     }, signal);
     if (!res.ok) {
