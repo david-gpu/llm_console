@@ -1141,6 +1141,21 @@
     background: var(--green-phosphor);
     color: var(--bg);
   }
+  
+  /* DOWNLOAD BUTTON BUSY STATE (while the LLM filename is being generated).
+   * Mirrors the speak-btn busy blink: the icon stays in place and blinks
+   * in place (binary on/off, no fade -- matching the CRT cursor blink
+   * philosophy), taps are ignored, and no text swaps in and out. */
+  .code-actions button.busy {
+    pointer-events: none;
+    animation: code-busy-blink 0.8s infinite;
+  }
+
+  @keyframes code-busy-blink {
+    0%, 49.9% { opacity: 1; }
+    50%, 100% { opacity: 0.35; }
+  }
+
 
   .markdown-body table {
     border-collapse: collapse;
@@ -1654,22 +1669,42 @@
   }
 
   /**
-   * Whitelist sanitizer for download filenames. The raw value comes from LLM
-   * output (which is itself steerable via prompt injection through the code
-   * snippet's own comments), so it is treated as doubly untrusted: path
-   * components are destroyed, the charset is allowlisted to
-   * [a-zA-Z0-9._-], and a sane extension is enforced. Worst case output is
-   * a boring "snippet.txt". Blacklists are not used on principle.
+   * Whitelist + contract sanitizer for download filenames. The raw value
+   * comes from LLM output (which is itself steerable via prompt injection
+   * through the code snippet's own comments), so it is treated as doubly
+   * untrusted. Beyond the original charset/path destruction it now also
+   * ENFORCES THE FILENAME CONTRACT, no matter what the model replies:
+   * whitespace becomes hyphens (words stay separated instead of being
+   * welded into one giant token), the name is capped at 7 hyphen-
+   * separated words and 60 chars (prose-style narration collapses to a
+   * name-shaped stem), and the extension, if present, survives the caps.
+   * Worst case output is a boring "snippet.txt". Blacklists are not used
+   * on principle.
    */
   function sanitizeFilename(raw) {
+    const MAX_WORDS = 7;
+    const MAX_CHARS = 60;
     let base = String(raw || '')
+      .split(/\r?\n/)[0]                       /* first line only: narration past line 1 is discarded */
       .split(/[\\/]/).pop()                    /* kill path components outright */
+      .replace(/\s+/g, '-')                    /* keep words separated: whitespace -> hyphens */
       .replace(/[^a-zA-Z0-9._-]/g, '')         /* allowlist only safe chars */
+      .replace(/-{2,}/g, '-')                  /* collapse hyphen runs */
       .replace(/\.{2,}/g, '.')                 /* collapse '..' runs */
-      .replace(/^[-.]+/, '');                  /* no leading dots/dashes */
+      .replace(/^[-.]+|[-.]+$/g, '');          /* no leading/trailing dots or dashes */
+
+    /* Enforce the 1-7-word contract: prose-like output is truncated to
+     * the first seven hyphen-separated words. */
+    const words = base.split('-').filter(Boolean);
+    base = (words.length > MAX_WORDS ? words.slice(0, MAX_WORDS) : words).join('-');
     if (!base) return 'snippet.txt';
-    if (!/\.[a-zA-Z0-9]{1,8}$/.test(base)) base += '.txt';
-    return base;
+
+    /* Enforce the length cap, preserving the extension across it. */
+    const m = base.match(/\.[a-zA-Z0-9]{1,8}$/);
+    const ext = m ? m[0] : '.txt';
+    let stem = m ? base.slice(0, base.length - m[0].length) : base;
+    if (stem.length > MAX_CHARS - ext.length) stem = stem.slice(0, MAX_CHARS - ext.length).replace(/[-.]+$/, '');
+    return (stem || 'snippet') + ext;
   }
 
   /**
@@ -1677,18 +1712,47 @@
    * for code download buttons. Deliberately abortable by nothing: this is a
    * fire-and-forget subsidiary call and is passed no signal, so it cannot
    * clobber the active turn's abort controller.
+   *
+   * The model receives 2 KB of snippet context (1 KB often captured only a
+   * file's comment header, which the model then summarized instead of
+   * naming the code) and a detailed system prompt with a one-shot example,
+   * so it names the CODE rather than narrating the request. Only the first
+   * line of the reply is kept -- anything the model says past the newline
+   * is discarded rather than welded into the name -- and the final shape
+   * is enforced by sanitizeFilename at the call site.
    */
   async function generateLLMFilename(codeText) {
     if (!CONFIG || !CONFIG.apiKey) return 'snippet.txt';
     try {
       const res = await apiFetch(CONFIG.apiPath, {
         model: CONFIG.model,
-        messages: [{ role: 'user', content: `Generate a clean filename for code snippet. Output ONLY 1-7 lowercase words with extension:\n\n${codeText.slice(0, 1024)}` }],
-        reasoning_effort: 'none', temperature: 0.1, max_tokens: 25, stream: false
+        reasoning_effort: 'low',
+        temperature: 0.1,
+        max_tokens: 25,
+        stream: false,
+        messages: [
+          { role: 'system', content:
+              'You generate download filenames for code snippets.\n' +
+              'Rules:\n' +
+              '1. Output ONLY the filename, nothing else. ' +
+                 'No explanation, no preamble, no quotes, no backticks, no sentence structure.\n' +
+              '2. Output 1-7 lowercase words separated by single hyphens, plus the correct ' +
+                 'file extension (e.g. .py, .js, .html, .sql, .txt).\n' +
+              '3. The output must describe the CONTENTS of the user submission, using its most salient nouns. ' +
+                 'Never describe the request itself\n' +
+              '4. If unsure, output: snippet.txt\n' +
+              'Example input: a Python function implementing merge sort\n' +
+              'Example output: merge-sort.py' },
+          { role: 'user', content: codeText.slice(0, 2048) },
+          { service_tier: 'priority' }
+        ]
       });
       if (!res.ok) return 'snippet.txt';
-      let fn = ((await res.json())?.choices?.[0]?.message?.content || '').trim().replace(/[`"'\s]/g, '').toLowerCase();
-      return fn.includes('.') ? fn : 'snippet.txt';
+      /* First line only. The old post-processing stripped ALL whitespace,
+       * welding a narrated sentence into one giant word; the word/length
+       * contract is now enforced by sanitizeFilename at the call site. */
+      return ((await res.json())?.choices?.[0]?.message?.content || '')
+        .split(/\r?\n/)[0].trim() || 'snippet.txt';
     } catch (e) { 
       return 'snippet.txt'; 
     }
@@ -1771,17 +1835,25 @@
         dlBtn.innerHTML = useIcon('download', 14, 14);
         dlBtn.onclick = async (e) => {
           e.stopPropagation();
-          const code = readCode();
-          dlBtn.innerHTML = `<span class="term-font" style="font-size:0.85em; padding:0 6px;">-- Downloading --</span>`;
-          const filename = sanitizeFilename(await generateLLMFilename(code));
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
-          a.download = filename;
-          a.click();
-          URL.revokeObjectURL(a.href);
-          dlBtn.innerHTML = useIcon('download', 14, 14);
+          /* Re-entry guard: while busy the button ignores taps via CSS, but
+           * this guard also protects against the async race of a second
+           * click landing before the class lands. */
+          if (dlBtn.classList.contains('busy')) return;
+          /* Busy blink replaces the old '-- Downloading --' text swap: the
+           * icon stays in place and blinks while the LLM names the file. */
+          dlBtn.classList.add('busy');
+          try {
+            const code = readCode();
+            const filename = sanitizeFilename(await generateLLMFilename(code));
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(a.href);
+          } finally {
+            dlBtn.classList.remove('busy');
+          }
         };
-
         actions.append(copyBtn, dlBtn);
       }
     });
