@@ -2827,7 +2827,7 @@
       const turnId = createUserMessage(displayPrompt, isImage ? displayPrompt : promptTextFromPayload(fullPayload), extractAttachmentParts(fullPayload));
       const newEl = createAssistantContainer();
       if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal, turnId);
-      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal, null, 0, turnId);
+      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal, turnId);
     } finally {
       isProcessing = false;
       activeAbortController = null;
@@ -2860,7 +2860,7 @@
       /* The bubble shows the display label; the edit button carries the
        * REAL (possibly empty) prompt text, not the label. */
       const turnId = createUserMessage(displayPrompt, prompt, extractAttachmentParts(fullPayload));
-      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal, null, 0, turnId);
+      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal, turnId);
     } finally { 
       isProcessing = false; 
       activeAbortController = null;
@@ -2871,7 +2871,19 @@
    * ==========================================================================
    * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
    * ==========================================================================
+   * Broken into single-purpose helpers; this function is only the
+   * orchestrator. TOOL BUDGET SEMANTICS: the budget is a quantity of
+   * remaining tool calls, captured ONCE by the turn-owning invocation and
+   * only ever decreased as calls are executed. A budget of 0 means "this
+   * round offers no tools" -- identically to a configured max of 0 -- so
+   * "exhausted" and "disabled" are one and the same state, handled by the
+   * same code path: the model simply has nothing to call and must answer
+   * from what it has. A settings change mid-turn can neither extend nor
+   * shrink a turn already in flight, because the value is captured once
+   * rather than re-read from CONFIG on every round.
+   * ==========================================================================
    */
+
   /* Base64 image parts are only sent for the CURRENT (latest) user turn.
    * When replaying older turns from conversationHistory, image parts are
    * substituted with a text placeholder: the vision model already received
@@ -2884,115 +2896,115 @@
       : p);
   }
 
-  async function executePromptRequest(fullPayload, displayPrompt, contentEl, signal, existingApiMessages = null, toolRoundCount = 0, turnId = nextTurnId++) {
-    const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i.type === 'image_url');
-    const activeModel = (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
-    updateStatusBar(activeModel);
+  /* Picks the model for a chat turn: image payloads route to the vision model. */
+  function pickChatModel(fullPayload) {
+    const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i && i.type === 'image_url');
+    return (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
+  }
 
-    let apiMessages = existingApiMessages;
-    if (!apiMessages) {
-      conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt, turnId });
-      apiMessages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt}];
-      /* NOTE ON THE REPLAY LOOP: image-generation history entries
-       * ({ role: 'assistant', type: 'image', url }) can never appear in
-       * this loop. The mode lock (lockConversationMode) makes a single
-       * timeline either chat or image generation, never both, and this
-       * replay path only ever runs in chat-locked conversations. So the
-       * entries seen here are strictly chat user/assistant entries, and
-       * stripStaleImages only ever encounters image_url content parts
-       * from vision chat turns. */
-      for (let i = 0; i < conversationHistory.length - 1; i++) {
-        const item = conversationHistory[i];
-        apiMessages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
-      }
-      apiMessages.push({ role: 'user', content: fullPayload });
+  /* Turn-owning rounds only: pushes the user entry into conversationHistory
+   * and replays the whole thread into apiMessages. NOTE ON THE REPLAY LOOP:
+   * image-generation history entries ({ role: 'assistant', type: 'image',
+   * url }) can never appear here. The mode lock (lockConversationMode) makes
+   * a single timeline either chat or image generation, never both, and this
+   * replay path only ever runs in chat-locked conversations. */
+  function buildApiMessages(fullPayload, displayPrompt, turnId) {
+    conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt, turnId });
+    const messages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt }];
+    for (let i = 0; i < conversationHistory.length - 1; i++) {
+      const item = conversationHistory[i];
+      messages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
     }
+    messages.push({ role: 'user', content: fullPayload });
+    return messages;
+  }
 
-    const tools = [];
-    const tavilyEnabled = !!CONFIG.tavilyApiKey && getMaxTavilyCalls() > 0;
-
-    if (tavilyEnabled) {
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'get_youtube_transcript',
-            description: 'Retrieves the transcript for a given YouTube video URL or Video ID. ' +
-                         'Use this tool for YouTube.',
-            parameters: {
-              type: 'object',
-              properties: {
-                video_id: { type: 'string', description: 'The YouTube Video ID or full YouTube video URL.' },
-                language: { type: 'string', description: 'Preferred language code (e.g. "en", "es"). Defaults to "en".' }
-              },
-              required: ['video_id']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'web_search',
-            description: 'Search the web. NEVER use this tool for Youtube',
-            parameters: {
-              type: 'object',
-              properties: {
-                query: { type: 'string' }
-              },
-              required: ['query']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'fetch_web_page',
-            description: 'Fetch a webpage. NEVER use this tool for Youtube',
-            parameters: {
-              type: 'object',
-              properties: {
-                urls: {
-                  type: 'array',
-                  items: { type: 'string' }
-                }
-              },
-              required: ['urls']
-            }
-          }
+  /* Static tool schema list. Whether the model is OFFERED these tools is a
+   * separate question, answered per-round by toolsForBudget. */
+  const TOOL_DEFINITIONS = [
+    {
+      type: 'function',
+      function: {
+        name: 'get_youtube_transcript',
+        description: 'Retrieves the transcript for a given YouTube video URL or Video ID. ' +
+                     'Use this tool for YouTube.',
+        parameters: {
+          type: 'object',
+          properties: {
+            video_id: { type: 'string', description: 'The YouTube Video ID or full YouTube video URL.' },
+            language: { type: 'string', description: 'Preferred language code (e.g. "en", "es"). Defaults to "en".' }
+          },
+          required: ['video_id']
         }
-      );
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description: 'Search the web. NEVER use this tool for Youtube',
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_web_page',
+        description: 'Fetch a webpage. NEVER use this tool for Youtube',
+        parameters: {
+          type: 'object',
+          properties: { urls: { type: 'array', items: { type: 'string' } } },
+          required: ['urls']
+        }
+      }
     }
+  ];
 
+  /* Tools are offered only while budget remains AND the Tavily key exists.
+   * toolBudget <= 0 (configured 0 or spent) yields an empty array, so the
+   * model has nothing to call and must produce a textual answer. */
+  function toolsForBudget(toolBudget) {
+    return (!!CONFIG.tavilyApiKey && toolBudget > 0) ? TOOL_DEFINITIONS : [];
+  }
+
+  /* Runs ONE SSE chat-completion round and returns the accumulated tool
+   * calls. The accumulated ANSWER TEXT is written into `state.text` live,
+   * as it streams, so the caller's abort path can finalize the turn with
+   * the partial text (the role the old function-scope fullText played).
+   * Throws a plain Error on HTTP failure and an AbortError on abort -- the
+   * caller owns both teardown paths. thinkText is LOCAL deliberately:
+   * each tool-loop round is a fresh invocation, so each round's reasoning
+   * phase starts clean and REPLACES the previous round's text in the
+   * visible tail. */
+  async function streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, state) {
     const payload = Object.assign(
-      { model: activeModel, messages: apiMessages, stream: true, tools },
+      { model: activeModel, messages: apiMessages, stream: true, tools: toolsForBudget(toolBudget) },
       (CONFIG.reasoningEffort && CONFIG.reasoningEffort !== 'none') ? { reasoning_effort: CONFIG.reasoningEffort } : {},
       (CONFIG.serviceTier === 'priority' || CONFIG.serviceTier === 'flex') ? { service_tier: CONFIG.serviceTier } : {},
       CONFIG.extraParams
     );
 
-    /* thinkText is a LOCAL (not global) deliberately: each tool-loop round
-     * is a fresh invocation, so each round's reasoning phase starts clean
-     * and REPLACES the previous round's text in the visible tail. */
-    let fullText = '', accumulatedToolCalls = {}, thinkText = '';
+    const res = await apiFetch(CONFIG.apiPath, payload, signal);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Request failed');
+
+    const reader = res.body.getReader(), decoder = new TextDecoder();
+    let buffer = '';
+    const accToolCalls = {};
+    let thinkText = '';
+
+    /* Direct stream teardown on abort: fetch-signal propagation to the
+     * body reader is not reliable in all engines (legacy Safari, some
+     * webviews), so abort also cancels the ReadableStream directly.
+     * reader.cancel() resolves the pending read() as {done:true} instead
+     * of rejecting, hence the signal.aborted check after the loop. */
+    const abortStream = () => { try { reader.cancel(); } catch (e) {} };
+    signal.addEventListener('abort', abortStream);
+
     try {
-      const res = await apiFetch(CONFIG.apiPath, payload, signal);
-      if (!res.ok) {
-        const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
-        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop();
-        resetInput(); return;
-      }
-
-      const reader = res.body.getReader(), decoder = new TextDecoder();
-      let buffer = '';
-
-      /* Direct stream teardown on abort: fetch-signal propagation to the
-       * body reader is not reliable in all engines (legacy Safari, some
-       * webviews), so abort also cancels the ReadableStream directly.
-       * reader.cancel() resolves the pending read() as {done:true} instead
-       * of rejecting, hence the signal.aborted check after the loop. */
-      const abortStream = () => { try { reader.cancel(); } catch (e) {} };
-      signal.addEventListener('abort', abortStream);
-
       while (true) {
         const { done, value } = await reader.read();
         if (done || signal.aborted) break;
@@ -3004,138 +3016,221 @@
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:') || trimmed === 'data: [DONE]') continue;
           try {
-            const parsed = JSON.parse(trimmed.slice(5).trim());
-            const delta = parsed?.choices?.[0]?.delta;
-            if (delta) {
-              /* DeepSeek-style APIs stream
-               * reasoning_content; some OpenAI-compatible providers use
-               * reasoning. Accept both. */
-              const thinkChunk = delta.reasoning_content || delta.reasoning;
-              if (thinkChunk) {
+            const delta = JSON.parse(trimmed.slice(5).trim())?.choices?.[0]?.delta;
+            if (!delta) continue;
+            /* DeepSeek-style APIs stream reasoning_content; some
+             * OpenAI-compatible providers use reasoning. Accept both. */
+            const thinkChunk = delta.reasoning_content || delta.reasoning;
+            if (thinkChunk) {
+              const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
+              if (thinkEl) {
+                if (thinkEl.style.display === 'none') {
+                  /* First reasoning delta of this round: clamp the tail
+                   * to the viewport (minus the "Thinking..." line and
+                   * breathing room) so the message can never grow the
+                   * document and push the screen around. */
+                  thinkEl.style.display = 'block';
+                  thinkEl.style.maxHeight = Math.max(120, conversationWrap.clientHeight - 80) + 'px';
+                  thinkEl.textContent = '';
+                }
+                thinkText += thinkChunk;
+                renderThinkingThrottled(thinkEl, thinkText);
+              }
+            }
+            if (delta.content) {
+              if (!state.text) {
+                /* First final-answer token: retire the thinking tail
+                 * (display:none, NOT removal -- a later tool-loop round
+                 * may stream reasoning again). The placeholder
+                 * "Thinking..." line is replaced by the answer in this
+                 * same frame. */
                 const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
-                if (thinkEl) {
-                  if (thinkEl.style.display === 'none') {
-                    /* First reasoning delta of this round: clamp the tail
-                     * to the viewport (minus the "Thinking..." line and
-                     * breathing room) so the message can never grow the
-                     * document and push the screen around. */
-                    thinkEl.style.display = 'block';
-                    thinkEl.style.maxHeight = Math.max(120, conversationWrap.clientHeight - 80) + 'px';
-                    thinkEl.textContent = '';
-                  }
-                  thinkText += thinkChunk;
-                  renderThinkingThrottled(thinkEl, thinkText);
-                }
+                if (thinkEl) { thinkEl.style.display = 'none'; thinkEl.textContent = ''; }
+                contentEl.classList.remove('placeholder');
+                alignAssistantToTop(contentEl.parentElement);
               }
-              if (delta.content) {
-                if (!fullText) {
-                  /* First final-answer token: retire the thinking
-                   * tail (display:none, NOT removal -- a later tool-loop
-                   * round may stream reasoning again). The placeholder
-                   * "Thinking..." line is replaced by the answer in this
-                   * same frame. */
-                  const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
-                  if (thinkEl) { thinkEl.style.display = 'none'; thinkEl.textContent = ''; }
-                  contentEl.classList.remove('placeholder');
-                  alignAssistantToTop(contentEl.parentElement);
-                }
-                fullText += delta.content;
-                renderMarkdownThrottled(contentEl, fullText);
-              }
-              if (delta.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  const idx = tc.index ?? 0;
-                  if (!accumulatedToolCalls[idx]) accumulatedToolCalls[idx] = { id: '', name: '', arguments: '' };
-                  if (tc.id) accumulatedToolCalls[idx].id = tc.id;
-                  if (tc.function?.name) accumulatedToolCalls[idx].name += tc.function.name;
-                  if (tc.function?.arguments) accumulatedToolCalls[idx].arguments += tc.function.arguments;
-                }
+              state.text += delta.content;
+              renderMarkdownThrottled(contentEl, state.text);
+            }
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!accToolCalls[idx]) accToolCalls[idx] = { id: '', name: '', arguments: '' };
+                if (tc.id) accToolCalls[idx].id = tc.id;
+                if (tc.function?.name) accToolCalls[idx].name += tc.function.name;
+                if (tc.function?.arguments) accToolCalls[idx].arguments += tc.function.arguments;
               }
             }
           } catch (e) {}
         }
       }
+    } finally {
       signal.removeEventListener('abort', abortStream);
+    }
 
-      /* A cancelled stream ends "cleanly"; re-raise as an AbortError so the
-       * existing catch branch (finalizeStoppedResponse + resetInput) runs. */
-      if (signal.aborted) {
-        const e = new Error('Aborted'); e.name = 'AbortError'; throw e;
+    /* A cancelled stream ends "cleanly"; re-raise as an AbortError so the
+     * caller's abort branch (finalizeStoppedResponse, partial-history
+     * push, resetInput) runs. */
+    if (signal.aborted) {
+      const e = new Error('Aborted'); e.name = 'AbortError'; throw e;
+    }
+
+    return Object.values(accToolCalls);
+  }
+
+  /* A tool failure is a RESULT for the model, not a turn error: the hint
+   * steers it away from retrying the identical call in a loop. */
+  function toolErrorResult(message) {
+    return JSON.stringify({
+      error: message,
+      hint: 'This tool call failed. DO NOT retry the same call with the same arguments. ' +
+            'Choose whether to answer from what you already know, ' +
+            'tell the user the Youtube transcript could not be retrieved, ' +
+            'or try a different tool only if it is going to move things forward.'
+    });
+  }
+
+  /* Renders the telemetry line and runs ONE tool call, returning its
+   * stringified result for the model. Only AbortError escapes: a stop
+   * during a Tavily fetch tears down the whole turn rather than being
+   * swallowed into a tool-error result. */
+  async function executeToolCall(tc, contentEl, streamedText, signal) {
+    const withTelemetry = (html) =>
+      renderMarkdown(contentEl, (streamedText ? streamedText + '\n\n' : '') + html);
+    try {
+      const args = JSON.parse(tc.arguments || '{}');
+      if (tc.name === 'get_youtube_transcript') {
+        withTelemetry(`<div class="tool-status-msg green-txt term-font">-- FETCHING YOUTUBE TRANSCRIPT "${escapeHtml(args.video_id || '')}"... --</div>`);
+        return await fetchYouTubeTranscript(args.video_id, args.language || 'en', signal);
       }
-      
-      const toolCallList = Object.values(accumulatedToolCalls);
-      if (toolCallList.length > 0) {
-        const maxCalls = getMaxTavilyCalls();
-        if (toolRoundCount >= maxCalls) {
-          fullText += `\n\n-- MAX TOOL CALLS REACHED. STOPPING LOOP --`;
-          renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); addSpeakButton(contentEl, fullText);
-          conversationHistory.push({ role: 'assistant', content: fullText, turnId }); resetInput(); return;
+      if (tc.name === 'web_search') {
+        withTelemetry(`<div class="tool-status-msg green-txt term-font">-- SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`);
+        return await executeTavilySearch(args.query, signal);
+      }
+      if (tc.name === 'fetch_web_page') {
+        withTelemetry(`<div class="tool-status-msg green-txt term-font">-- FETCHING WEB PAGE... --</div>`);
+        return await executeTavilyExtract(args.urls, signal);
+      }
+      /* Unknown tool name: an explicit error result, so the model does
+       * not sit waiting for a response that never comes. */
+      return toolErrorResult('Unknown tool: ' + tc.name);
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      return toolErrorResult(err.message);
+    }
+  }
+
+  /* Shared "the chat turn is over" tail: render the final text, wire the
+   * retry & read-aloud buttons, record the assistant entry (tagged with
+   * the turn id so edit/retry rolls it back with the rest of the turn),
+   * and re-arm the input controls. */
+  function completeAssistantTurn(contentEl, fullText, displayPrompt, fullPayload, turnId) {
+    renderMarkdown(contentEl, fullText);
+    addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
+    addSpeakButton(contentEl, fullText);
+    conversationHistory.push({ role: 'assistant', content: fullText, turnId });
+    resetInput();
+  }
+
+  /* 
+   * ==========================================================================
+   * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
+   * ==========================================================================
+   * Entry point for a chat turn. Parameters: what the
+   * user submitted (fullPayload), what the bubble shows (displayPrompt),
+   * where the answer streams (contentEl), how to abort (signal), and which
+   * turn this is (turnId, for edit/retry rollback).
+   *
+   * TOOL BUDGET SEMANTICS: the budget is a quantity of remaining tool
+   * calls, captured once at turn start and only ever decreased as calls
+   * execute. A budget of 0 means "no tools offered this round" --
+   * identically to a configured max of 0 -- so "exhausted" and "disabled"
+   * are one and the same state: the model has nothing to call and must
+   * answer from what it has. A settings change mid-turn can neither
+   * extend nor shrink a turn already in flight, because the value is
+   * captured once rather than re-read from CONFIG each round.
+   * ==========================================================================
+   */
+  async function executePromptRequest(fullPayload, displayPrompt, contentEl, signal, turnId) {
+    const activeModel = pickChatModel(fullPayload);
+    updateStatusBar(activeModel);
+
+    /* Turn-owned history work happens here, once, at entry: push the user
+     * entry, build the replayed apiMessages thread. The round loop below
+     * only ever APPENDS to apiMessages; it never touches
+     * conversationHistory, so the single-owner cleanup rule is trivially
+     * satisfied. */
+    const apiMessages = buildApiMessages(fullPayload, displayPrompt, turnId);
+    let toolBudget = getMaxTavilyCalls();
+
+    /* Written live by the stream so the abort path below can finalize the
+     * turn with the partial text. */
+    const state = { text: '' };
+
+    try {
+      for (;;) {
+        const toolCalls = await streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, state);
+
+        /* No tool calls: the model produced its final answer. Turn over. */
+        if (toolCalls.length === 0) {
+          completeAssistantTurn(contentEl, state.text, displayPrompt, fullPayload, turnId);
+          return;
         }
 
-        apiMessages.push({ role: 'assistant', content: fullText || null, tool_calls: toolCallList.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments } })) });
-
-        for (const tc of toolCallList) {
-          let resultStr = '';
-          try {
-            const args = JSON.parse(tc.arguments || '{}');
-            if (tc.name === 'get_youtube_transcript') {
-              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- FETCHING YOUTUBE TRANSCRIPT "${escapeHtml(args.video_id || '')}"... --</div>`);
-              resultStr = await fetchYouTubeTranscript(args.video_id, args.language || 'en', signal);
-            } else if (tc.name === 'web_search') {
-              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- SEARCHING WEB "${escapeHtml(args.query || '')}"... --</div>`);
-              resultStr = await executeTavilySearch(args.query, signal);
-            } else if (tc.name === 'fetch_web_page') {
-              renderMarkdown(contentEl, (fullText ? fullText + '\n\n' : '') + `<div class="tool-status-msg green-txt term-font">-- FETCHING WEB PAGE... --</div>`);
-              resultStr = await executeTavilyExtract(args.urls, signal);
-            }
-          } catch (err) {
-            if (err.name === 'AbortError') throw err;
-            resultStr = JSON.stringify({
-              error: err.message,
-              hint: 'This tool call failed. DO NOT retry the same call with the same arguments. ' +
-                    'Choose whether to answer from what you already know, ' +
-                    'tell the user the Youtube transcript could not be retrieved, ' +
-                    'or try a different tool only if it is going to move things forward.'
-            });
-          }
-          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
+        /* Tool calls arrived on a round where NO tools were offered
+         * (budget at 0, whether configured that way or spent by earlier
+         * calls -- a model emitting calls against an empty tools array).
+         * No further API round is made: the pending calls are discarded
+         * and the turn finishes with whatever text streamed. apiMessages
+         * is turn-scoped and dies here, and conversationHistory only ever
+         * stores final text content, so nothing dangles. */
+        if (toolBudget <= 0) {
+          completeAssistantTurn(contentEl,
+            state.text + '\n\n-- TOOL BUDGET EXHAUSTED; PENDING TOOL CALLS DISCARDED --',
+            displayPrompt, fullPayload, turnId);
+          return;
         }
-        /* Recursion note: the next invocation gets a fresh local thinkText
-         * and the SAME contentEl, so a second reasoning phase streams into
-         * the same (still-attached or re-shown) tail element. It also
-         * keeps the SAME turnId so every history entry this turn produces
-         * is rolled back together on edit/retry. */
-        return await executePromptRequest(fullPayload, displayPrompt, contentEl, signal, apiMessages, toolRoundCount + 1, turnId);
+
+        /* Execute the batch, then loop for the next round. The budget
+         * decreases by the calls just executed, matching the "up to N
+         * tool calls in total" line the runtime context gives the model;
+         * if a batch overshoots the remaining budget, clamp to 0 (one
+         * batch is the accepted overrun bound -- no partial-decline
+         * logic). Each iteration re-runs streamChatCompletion, so each
+         * round's thinking phase starts fresh in a clean local. */
+        apiMessages.push({
+          role: 'assistant',
+          content: state.text || null,
+          tool_calls: toolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments } }))
+        });
+        for (const tc of toolCalls) {
+          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: await executeToolCall(tc, contentEl, state.text, signal) });
+        }
+        toolBudget = Math.max(0, toolBudget - toolCalls.length);
       }
-      renderMarkdown(contentEl, fullText);
-      addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
-      addSpeakButton(contentEl, fullText);
-      conversationHistory.push({ role: 'assistant', content: fullText, turnId });
-      resetInput();
     } catch (err) {
       /* Stop button: whatever streamed in survives as a partial turn. */
       if (err.name === 'AbortError') {
-        finalizeStoppedResponse(contentEl, fullText);
+        finalizeStoppedResponse(contentEl, state.text);
         addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
-        addSpeakButton(contentEl, fullText);
+        addSpeakButton(contentEl, state.text);
         /* Only partial content makes it into history; an empty abort
          * leaves the turn unrecorded (the retry button recreates it).
          * Either way the entry carries the turn's id, so rollback
          * filters it out correctly even though user/assistant entries
          * no longer strictly alternate. */
-        fullText && conversationHistory.push({ role: 'assistant', content: fullText, turnId });
+        state.text && conversationHistory.push({ role: 'assistant', content: state.text, turnId });
         resetInput();
         return;
       }
       setError(contentEl, err.message || 'Request failed');
       addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
-      /* Only the turn-owning invocation (no existingApiMessages) pushed
-       * the user message to history, so only it may pop it back out. */
-      if (!existingApiMessages) conversationHistory.pop();
+      /* This entry point is the turn owner (there is no recursion), so it
+       * pops the user entry it pushed in buildApiMessages. */
+      conversationHistory.pop();
       resetInput();
     }
   }
-
 
   /* 
    * ==========================================================================
