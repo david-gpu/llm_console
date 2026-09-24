@@ -403,6 +403,24 @@
     pointer-events: none;
   }
 
+  /* REASONING TOKEN STREAM (system output space: dim green family).
+   * overflow:hidden (NOT auto) so it never shows a scrollbar and never
+   * participates in the user's scroll gestures -- the tail-follow is done
+   * programmatically via scrollTop, which works even on overflow:hidden.
+   * textContent (not innerHTML) is used for the reasoning, so no markdown
+   * parsing, no sanitizer round-trip, and no reflow cost beyond the
+   * appended text itself. */
+  .thinking-scroll {
+    overflow-y: hidden;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--green-dim);
+    font-size: 0.85em;
+    line-height: 1.45;
+    text-align: left;
+    margin: 4px 0 8px;
+  }
+
   /* EMPTY SPLASH STATE
    * max-width:100% plus the responsive svg sizing below guarantee the splash
    * never overflows its column. On narrow phones the old fixed 360px robot
@@ -1861,12 +1879,14 @@
 
   function setError(container, message) {
     container.classList.remove('placeholder');
+    dismissThinking(container);
     container.innerHTML += `<div class="error-msg-text">&lt; ERROR: ${escapeHtml(message)} &gt;</div>`;
   }
-
+  
   function finalizeStoppedResponse(container, text) {
     pendingRenderData = null;
     container.classList.remove('placeholder');
+    dismissThinking(container);
     if (text) renderMarkdown(container, text); else container.textContent = '';
     container.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
   }
@@ -2305,7 +2325,13 @@
   function createAssistantContainer() {
     const div = document.createElement('div');
     div.className = 'message assistant term-font';
-    div.innerHTML = `<div class="response markdown-body placeholder green-txt term-font">Thinking...</div>`;
+    /* The response div keeps the placeholder "Thinking..." animation pinned
+     * at the top; raw reasoning tokens stream into the sibling below it. The
+     * sibling is hidden until the first reasoning delta arrives (models with
+     * reasoningEffort "none", or non-reasoning models, never show it). */
+    div.innerHTML =
+      `<div class="response markdown-body placeholder green-txt term-font">Thinking...</div>` +
+      `<div class="thinking-scroll" style="display:none;"></div>`;
     conversationWrap.appendChild(div);
     addScrollSpacer();
     scrollAssistantToTop(div);
@@ -2765,7 +2791,8 @@
           type: 'function',
           function: {
             name: 'get_youtube_transcript',
-            description: 'Retrieves the page content for a given YouTube video URL or Video ID via a server-side extractor. Use this tool for YouTube videos.',
+            description: 'Retrieves the transcript for a given YouTube video URL or Video ID. ' +
+                         'Use this tool for YouTube.',
             parameters: {
               type: 'object',
               properties: {
@@ -2776,8 +2803,37 @@
             }
           }
         },
-        { type: 'function', function: { name: 'web_search', description: 'Search web. NEVER use this tool for Youtube', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
-        { type: 'function', function: { name: 'fetch_web_page', description: 'Fetch a webpage. NEVER use this tool for Youtube', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } } }
+        {
+          type: 'function',
+          function: {
+            name: 'web_search',
+            description: 'Search the web. NEVER use this tool for Youtube',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' }
+              },
+              required: ['query']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'fetch_web_page',
+            description: 'Fetch a webpage. NEVER use this tool for Youtube',
+            parameters: {
+              type: 'object',
+              properties: {
+                urls: {
+                  type: 'array',
+                  items: { type: 'string' }
+                }
+              },
+              required: ['urls']
+            }
+          }
+        }
       );
     }
 
@@ -2788,7 +2844,10 @@
       CONFIG.extraParams
     );
 
-    let fullText = '', accumulatedToolCalls = {};
+    /* thinkText is a LOCAL (not global) deliberately: each tool-loop round
+     * is a fresh invocation, so each round's reasoning phase starts clean
+     * and REPLACES the previous round's text in the visible tail. */
+    let fullText = '', accumulatedToolCalls = {}, thinkText = '';
     try {
       const res = await apiFetch(CONFIG.apiPath, payload, signal);
       if (!res.ok) {
@@ -2814,10 +2873,37 @@
             const parsed = JSON.parse(trimmed.slice(5).trim());
             const delta = parsed?.choices?.[0]?.delta;
             if (delta) {
+              /* DeepSeek-style APIs stream
+               * reasoning_content; some OpenAI-compatible providers use
+               * reasoning. Accept both. */
+              const thinkChunk = delta.reasoning_content || delta.reasoning;
+              if (thinkChunk) {
+                const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
+                if (thinkEl) {
+                  if (thinkEl.style.display === 'none') {
+                    /* First reasoning delta of this round: clamp the tail
+                     * to the viewport (minus the "Thinking..." line and
+                     * breathing room) so the message can never grow the
+                     * document and push the screen around. */
+                    thinkEl.style.display = 'block';
+                    thinkEl.style.maxHeight = Math.max(120, conversationWrap.clientHeight - 80) + 'px';
+                    thinkEl.textContent = '';
+                  }
+                  thinkText += thinkChunk;
+                  renderThinkingThrottled(thinkEl, thinkText);
+                }
+              }
               if (delta.content) {
-                if (!fullText) { 
-                  contentEl.classList.remove('placeholder'); 
-                  alignAssistantToTop(contentEl.parentElement); 
+                if (!fullText) {
+                  /* First final-answer token: retire the thinking
+                   * tail (display:none, NOT removal -- a later tool-loop
+                   * round may stream reasoning again). The placeholder
+                   * "Thinking..." line is replaced by the answer in this
+                   * same frame. */
+                  const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
+                  if (thinkEl) { thinkEl.style.display = 'none'; thinkEl.textContent = ''; }
+                  contentEl.classList.remove('placeholder');
+                  alignAssistantToTop(contentEl.parentElement);
                 }
                 fullText += delta.content;
                 renderMarkdownThrottled(contentEl, fullText);
@@ -2862,8 +2948,6 @@
               resultStr = await executeTavilyExtract(args.urls, signal);
             }
           } catch (err) {
-            /* A user-initiated abort must tear down the whole turn, not be
-             * recorded as a tool error and fed back to the model. */
             if (err.name === 'AbortError') throw err;
             resultStr = JSON.stringify({
               error: err.message,
@@ -2875,17 +2959,74 @@
           }
           apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
         }
+        /* Recursion note: the next invocation gets a fresh local thinkText
+         * and the SAME contentEl, so a second reasoning phase streams into
+         * the same (still-attached or re-shown) tail element. */
         return await executePromptRequest(fullPayload, displayPrompt, contentEl, signal, apiMessages, toolRoundCount + 1);
       }
-
-      renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); addSpeakButton(contentEl, fullText);
-      conversationHistory.push({ role: 'assistant', content: fullText }); resetInput();
+      renderMarkdown(contentEl, fullText);
+      addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
+      addSpeakButton(contentEl, fullText);
+      conversationHistory.push({ role: 'assistant', content: fullText });
+      resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); addSpeakButton(contentEl, fullText); fullText && conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return; }
-      setError(contentEl, err.message || 'Request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); if (!existingApiMessages) conversationHistory.pop(); resetInput();
-    } finally { 
-      activeAbortController = null; 
+      /* Stop button: whatever streamed in survives as a partial turn. */
+      if (err.name === 'AbortError') {
+        finalizeStoppedResponse(contentEl, fullText);
+        addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
+        addSpeakButton(contentEl, fullText);
+        /* Only partial content makes it into history; an empty abort
+         * leaves the turn unrecorded (the retry button recreates it). */
+        fullText && conversationHistory.push({ role: 'assistant', content: fullText });
+        resetInput();
+        return;
+      }
+      setError(contentEl, err.message || 'Request failed');
+      addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
+      /* Only the turn-owning invocation (no existingApiMessages) pushed
+       * the user message to history, so only it may pop it back out. */
+      if (!existingApiMessages) conversationHistory.pop();
+      resetInput();
+    } finally {
+      activeAbortController = null;
     }
+  }
+
+
+  /* 
+   * ==========================================================================
+   * REASONING TOKEN STREAM
+   * Same rAF-throttle contract as renderMarkdownThrottled: reasoning deltas
+   * arrive per-token, DOM is touched once per frame. Single-flight safety
+   * comes from the same guarantee the markdown throttle relies on (only one
+   * response stream is live at a time).
+   * ==========================================================================
+   */
+  let thinkRenderScheduled = false, pendingThinkText = '';
+
+  function renderThinkingThrottled(thinkEl, text) {
+    pendingThinkText = text;
+    if (!thinkRenderScheduled) {
+      thinkRenderScheduled = true;
+      requestAnimationFrame(() => {
+        /* textContent, not innerHTML: raw prose, no markdown pass, no
+         * sanitizer round-trip, XSS-proof by construction. */
+        thinkEl.textContent = pendingThinkText;
+        /* Tail-follow on an overflow:hidden element: scrollTop works even
+         * when the scrollbar is suppressed, which is what pins the newest
+         * tokens on screen without ever growing the document. */
+        thinkEl.scrollTop = thinkEl.scrollHeight;
+        thinkRenderScheduled = false;
+      });
+    }
+  }
+
+  /* Retires the reasoning tail. Removal (not display:none) here because these
+   * call sites mean the turn is OVER -- no further rounds will stream. The
+   * first-final-answer-token transition inside the SSE loop uses display:none
+   * instead, because a tool-loop round may re-show the element later. */
+  function dismissThinking(contentEl) {
+    contentEl?.parentElement?.querySelector('.thinking-scroll')?.remove();
   }
 
   /* IMAGE GENERATION EXECUTION */
