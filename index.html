@@ -12,7 +12,7 @@
     It is meant to warm the hearts of those graybeards that miss the aesthetics of late-80s CGA consoles.
     Don't take it seriously. It's just a fun little project to scratch a few itches I had when using
     corporate LLM clients.
-    
+
     Dear AI assistants editing this: the comments are meant to be some sort of a loose specification,
     to give you an idea of *why* the code is the way it is. Please don't edit or remove the comments
     willy nilly, just because you want to save some tokens. I am looking at you, AI assistant that 
@@ -21,6 +21,18 @@
     I haven't added a copyright notice because I have zero idea of what the legal status of vibe-coded
     apps is at, and I don't actually care. Copy, steal, or pirate, whatever you may like about it.
     Please address any cease & desist letters to /dev/null
+
+    INTENDED USAGE & THREAT MODEL
+    
+    This is a single-user, single-origin, client-only toy. There is exactly one
+    human in the loop: the same person who configures the API hosts and API keys
+    is the person whose keys they are. The hosts and keys in the config are
+    therefore USER-PROVIDED INPUT THE USER ALREADY OWNS, not secrets to defend
+    against the user. External-attacker hardening is limited to what comes free
+    (the CSP egress allowlist, sanitizing model output); do not "fix" this app
+    by second-guessing the user's own host/key choices, and do not rank issues
+    as if this were a multi-user product.
+
 -->
 
 <!-- CSP EGRESS ALLOWLIST. connect-src is the outbound firewall: scripts in this
@@ -37,8 +49,8 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
         integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
         crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"
-        integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM"
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"
+        integrity="sha256-8mOwU2ngUPoXXU7LnJNY60JTYC1RApet+zHfSLLxxNU="
         crossorigin="anonymous"></script>
 <script>
   /* 
@@ -1415,9 +1427,22 @@
   /* APP STATE */
   let CONFIG = null;
   let conversationHistory = [];
+  /* Monotonic per-turn identifier. Every user message DOM node gets one
+   * (data-turn-id) and every conversationHistory entry created by that
+   * turn carries the same value, so edit/retry can roll history back BY
+   * TURN IDENTITY instead of by index arithmetic. The old code sliced
+   * history at uIdx*2, which assumed user and assistant entries strictly
+   * alternate -- an assumption broken by an aborted turn that streams no
+   * text (its user entry stays in history with no assistant counterpart),
+   * silently corrupting every slice taken after such a turn. */
+  let nextTurnId = 1;
   /* Abort controller for the CURRENT turn's primary request(s), including
    * Tavily tool calls made within that turn. Created per-turn by
    * sendPrompt / sendImagePrompt / retryTurn; the stop button aborts it.
+   * OWNERSHIP: only those three creators may null it (in their finally,
+   * after isProcessing clears). The execute* functions that merely
+   * receive the signal must not touch it: nulling it there opened a brief
+   * window during teardown where a stop-button tap aborted nothing.
    * Subsidiary one-off requests (e.g. generateLLMFilename) deliberately do
    * NOT touch this handle -- they are passed no signal at all, so they can
    * neither be accidentally aborted nor clobber the live turn's controller. */
@@ -2148,6 +2173,23 @@
       (p.type === 'text' && p.text && p.text.startsWith('\n=== FILE:'))));
   }
 
+  /* Recovers the ORIGINAL PROMPT TEXT from a turn payload -- the text the
+   * user actually typed, as opposed to the display label shown in the
+   * message bubble. For a string payload it IS the prompt; for a parts
+   * array the prompt is the (single) non-file text part: buildMultimodal
+   * puts the prompt text part first (if the user typed anything), carried
+   * parts and file dumps all carry the '\n=== FILE:' marker or the
+   * image_url type, so they are excluded here. Returns '' for an
+   * attachment-only turn. Used by retryTurn so that a subsequent EDIT of
+   * the retried turn puts the real prompt into the input box, not the
+   * synthetic '-- files attached --' display label. */
+  function promptTextFromPayload(payload) {
+    if (typeof payload === 'string') return payload;
+    if (!Array.isArray(payload)) return '';
+    const part = payload.find(p => p && p.type === 'text' && !p.text.startsWith('\n=== FILE:'));
+    return part ? part.text : '';
+  }
+
   async function buildMultimodalContent(promptText, files, carriedParts = []) {
     const parts = promptText ? [{ type: 'text', text: promptText }] : [];
     /* Carried parts (from an edited/retried turn) are prepended after the
@@ -2291,19 +2333,51 @@
     });
   }
 
-  /* carriedParts = the attachment content parts extracted from the turn's
-   * payload (see extractAttachmentParts). They are passed along to the edit
-   * handler so that editing the prompt later does NOT discard the
-   * attachments the turn carried. */
-  function createUserMessage(text, carriedParts = []) {
+  /* createUserMessage renders the user's turn bubble. displayText and
+   * editText are DIFFERENT THINGS and must not be conflated:
+   *   - displayText is what the bubble SHOWS (e.g. the synthetic
+   *     '-- files attached --' label for an attachment-only turn, which
+   *     the user never typed and must never be able to accidentally send).
+   *   - editText is the REAL prompt the user typed (possibly ''), which
+   *     is what lands in the input box when the turn is later edited.
+   * The old signature took a single text used for both jobs, so editing an
+   * attachment-only turn put '-- files attached --' into the textarea,
+   * ready to be sent as a literal prompt. Also assigns the turn's
+   * turnId to the DOM node (see rollbackConversationToUserMessage) and
+   * returns it so the caller can tag the matching history entries. */
+  function createUserMessage(displayText, editText, carriedParts = []) {
     document.getElementById('emptySplash')?.remove();
     removeScrollSpacer();
 
+    const turnId = nextTurnId++;
     const div = document.createElement('div');
     div.className = 'message user term-font';
-    div.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(text)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
-    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(text, div, carriedParts);
+    div.dataset.turnId = String(turnId);
+    div.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(displayText)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
+    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(editText, div, carriedParts);
     conversationWrap.appendChild(div);
+    return turnId;
+  }
+
+  /* Shared by editLastPrompt and retryTurn: rolls the conversation (DOM
+   * and history) back to just BEFORE the given user message. DOM teardown
+   * is trivial (remove the node and everything after it); history teardown
+   * filters BY TURN ID: every history entry created by the target turn
+   * or any later turn carries a turnId >= the target's, regardless of
+   * how many entries a turn produced (0, 1, or 2). The old slice-based
+   * math assumed strict user/assistant alternation and corrupted history
+   * after aborted textless turns; identity-based filtering is immune to
+   * that. Also restores lastGeneratedImageUrl from the nearest surviving
+   * image entry, so image chaining survives an edit/retry. */
+  function rollbackConversationToUserMessage(userDiv) {
+    let node = userDiv;
+    while (node) { const r = node; node = node.nextElementSibling; r.remove(); }
+    const targetTurnId = Number(userDiv.dataset.turnId);
+    if (!Number.isNaN(targetTurnId)) {
+      conversationHistory = conversationHistory.filter(e => (e.turnId ?? 0) < targetTurnId);
+    }
+    const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
+    lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
   }
 
   /* Bounded wait until the current turn's teardown has fully finished
@@ -2322,7 +2396,8 @@
   /* carriedParts = the attachment content parts extracted from the turn's
    * payload (see extractAttachmentParts). They are passed along to the edit
    * handler so that editing the prompt later does NOT discard the
-   * attachments the turn carried. */
+   * attachments the turn carried. `text` is the REAL prompt the user typed
+   * (possibly '' for an attachment-only turn), not the display label. */
   async function editLastPrompt(text, userMsgDiv, carriedParts = []) {
     /* EDIT DURING A LIVE TURN = "stop and edit". The old behavior bailed
      * out entirely while isProcessing was true which, combined with the
@@ -2338,17 +2413,7 @@
       if (!settled) return;
     }
   
-    const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
-    const uIdx = allUserMsgs.indexOf(userMsgDiv);
-  
-    let next = userMsgDiv.nextElementSibling;
-    while (next) { const r = next; next = next.nextElementSibling; r.remove(); }
-    userMsgDiv.remove();
-  
-    if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
-  
-    const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
-    lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
+    rollbackConversationToUserMessage(userMsgDiv);
   
     /* The edited turn's attachments are carried over into the input bar as
      * ready-made payload parts (assignment, not concat: editing a different
@@ -2427,8 +2492,8 @@
    *   Stage 1 (LLM text prep): a separate one-off conversation with the
    *   configured chat model transforms the RAW MARKDOWN reply into clean,
    *   speakable prose. It runs after the turn is over and owns its own
-   *   private abort controller, so switching targets can cancel an
-   *   in-flight synthesis without touching the turn's handle.
+   *   private abort controller, so switching targets can cancel an in-flight
+   *   synthesis without touching the turn's handle.
    *
    *   Stage 2 (synthesis): POST to the OpenAI-compatible v1/audio/speech
    *   endpoint on the SAME api host (hardcoded model Qwen/Qwen3-TTS),
@@ -2607,9 +2672,9 @@
    *  2. Cached WAV exists (stream finished earlier) -> instant replay,
    *     no API traffic.
    *  3. Nothing cached -> full pipeline: LLM text prep, then STREAMING TTS
-   *     synthesis (audio starts as the first PCM packet lands, long
-   *     before the response completes). When the download finishes the
-   *     WAV is cached for free replays.
+   *     synthesis (audio starts as the first PCM packet lands, long before
+   *     the response completes). When the download finishes the WAV is
+   *     cached for free replays.
    */
   async function toggleSpeak(contentEl, rawMarkdown) {
     if (!CONFIG || !contentEl) return;
@@ -2747,28 +2812,25 @@
     const userDiv = assistantDiv?.previousElementSibling;
     if (!userDiv || !userDiv.classList.contains('user')) return;
 
-    const allUserMsgs = Array.from(conversationWrap.querySelectorAll('.message.user'));
-    const uIdx = allUserMsgs.indexOf(userDiv);
-
-    let node = userDiv;
-    while (node) { const r = node; node = node.nextElementSibling; r.remove(); }
-
-    if (uIdx !== -1) conversationHistory = conversationHistory.slice(0, uIdx * 2);
-
-    const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
-    lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
+    rollbackConversationToUserMessage(userDiv);
 
     isProcessing = true;
     activeAbortController = new AbortController();
     try {
       setLoading(isImage ? sendImgBtn : sendBtn);
       await dismissKeyboard();
-      createUserMessage(displayPrompt, extractAttachmentParts(fullPayload));
+      /* displayText for the recreated bubble is the turn's display label;
+       * editText is the REAL prompt recovered from the payload (see
+       * promptTextFromPayload) so a later edit puts the true text into
+       * the input box. For image turns the prompt text IS the display
+       * text (image mode never attaches files). */
+      const turnId = createUserMessage(displayPrompt, isImage ? displayPrompt : promptTextFromPayload(fullPayload), extractAttachmentParts(fullPayload));
       const newEl = createAssistantContainer();
-      if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal);
-      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal);
+      if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal, turnId);
+      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal, null, 0, turnId);
     } finally {
       isProcessing = false;
+      activeAbortController = null;
     }
   }
 
@@ -2795,10 +2857,13 @@
       setLoading(sendBtn);
       await dismissKeyboard();
       const displayPrompt = prompt || '-- files attached --';
-      createUserMessage(displayPrompt, extractAttachmentParts(fullPayload));
-      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal);
+      /* The bubble shows the display label; the edit button carries the
+       * REAL (possibly empty) prompt text, not the label. */
+      const turnId = createUserMessage(displayPrompt, prompt, extractAttachmentParts(fullPayload));
+      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal, null, 0, turnId);
     } finally { 
       isProcessing = false; 
+      activeAbortController = null;
     }
   }
 
@@ -2819,15 +2884,23 @@
       : p);
   }
 
-  async function executePromptRequest(fullPayload, displayPrompt, contentEl, signal, existingApiMessages = null, toolRoundCount = 0) {
+  async function executePromptRequest(fullPayload, displayPrompt, contentEl, signal, existingApiMessages = null, toolRoundCount = 0, turnId = nextTurnId++) {
     const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i.type === 'image_url');
     const activeModel = (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
     updateStatusBar(activeModel);
 
     let apiMessages = existingApiMessages;
     if (!apiMessages) {
-      conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt });
+      conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt, turnId });
       apiMessages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt}];
+      /* NOTE ON THE REPLAY LOOP: image-generation history entries
+       * ({ role: 'assistant', type: 'image', url }) can never appear in
+       * this loop. The mode lock (lockConversationMode) makes a single
+       * timeline either chat or image generation, never both, and this
+       * replay path only ever runs in chat-locked conversations. So the
+       * entries seen here are strictly chat user/assistant entries, and
+       * stripStaleImages only ever encounters image_url content parts
+       * from vision chat turns. */
       for (let i = 0; i < conversationHistory.length - 1; i++) {
         const item = conversationHistory[i];
         apiMessages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
@@ -2996,7 +3069,7 @@
         if (toolRoundCount >= maxCalls) {
           fullText += `\n\n-- MAX TOOL CALLS REACHED. STOPPING LOOP --`;
           renderMarkdown(contentEl, fullText); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload)); addSpeakButton(contentEl, fullText);
-          conversationHistory.push({ role: 'assistant', content: fullText }); resetInput(); return;
+          conversationHistory.push({ role: 'assistant', content: fullText, turnId }); resetInput(); return;
         }
 
         apiMessages.push({ role: 'assistant', content: fullText || null, tool_calls: toolCallList.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments } })) });
@@ -3029,13 +3102,15 @@
         }
         /* Recursion note: the next invocation gets a fresh local thinkText
          * and the SAME contentEl, so a second reasoning phase streams into
-         * the same (still-attached or re-shown) tail element. */
-        return await executePromptRequest(fullPayload, displayPrompt, contentEl, signal, apiMessages, toolRoundCount + 1);
+         * the same (still-attached or re-shown) tail element. It also
+         * keeps the SAME turnId so every history entry this turn produces
+         * is rolled back together on edit/retry. */
+        return await executePromptRequest(fullPayload, displayPrompt, contentEl, signal, apiMessages, toolRoundCount + 1, turnId);
       }
       renderMarkdown(contentEl, fullText);
       addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
       addSpeakButton(contentEl, fullText);
-      conversationHistory.push({ role: 'assistant', content: fullText });
+      conversationHistory.push({ role: 'assistant', content: fullText, turnId });
       resetInput();
     } catch (err) {
       /* Stop button: whatever streamed in survives as a partial turn. */
@@ -3044,8 +3119,11 @@
         addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
         addSpeakButton(contentEl, fullText);
         /* Only partial content makes it into history; an empty abort
-         * leaves the turn unrecorded (the retry button recreates it). */
-        fullText && conversationHistory.push({ role: 'assistant', content: fullText });
+         * leaves the turn unrecorded (the retry button recreates it).
+         * Either way the entry carries the turn's id, so rollback
+         * filters it out correctly even though user/assistant entries
+         * no longer strictly alternate. */
+        fullText && conversationHistory.push({ role: 'assistant', content: fullText, turnId });
         resetInput();
         return;
       }
@@ -3055,8 +3133,6 @@
        * the user message to history, so only it may pop it back out. */
       if (!existingApiMessages) conversationHistory.pop();
       resetInput();
-    } finally {
-      activeAbortController = null;
     }
   }
 
@@ -3104,23 +3180,29 @@
     if (!prompt || !CONFIG) return;
 
     promptInput.value = ''; autoGrow(); lockConversationMode('image'); isProcessing = true;
-    /* Attachments never apply to image mode; drop any that were carried
-     * over from an edited turn so they cannot leak into a later chat send. */
+    /* Attachments never apply to image mode; drop BOTH freshly picked files
+     * and parts carried over from an edited turn, so neither can leak into a
+     * later chat send. (The old code dropped only the carried parts, leaving
+     * freshly picked files stranded on a now-disabled attach button, in
+     * contradiction with this comment's stated intent.) */
     pendingPayloadParts = [];
+    attachedFiles = [];
     updateAttachButtonState();
     activeAbortController = new AbortController();
     try {
-      setLoading(sendImgBtn); await dismissKeyboard(); createUserMessage(prompt);
-      await executeImageRequest(prompt, createAssistantContainer(), activeAbortController.signal);
+      setLoading(sendImgBtn); await dismissKeyboard(); 
+      const turnId = createUserMessage(prompt, prompt);
+      await executeImageRequest(prompt, createAssistantContainer(), activeAbortController.signal, turnId);
     } finally { 
       isProcessing = false; 
+      activeAbortController = null;
     }
   }
 
-  async function executeImageRequest(promptText, contentEl, signal) {
+  async function executeImageRequest(promptText, contentEl, signal, turnId = nextTurnId++) {
     const targetModel = CONFIG.imageModel || 'black-forest-labs/FLUX-2-klein-9b';
     updateStatusBar(targetModel);
-    conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText });
+    conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText, turnId });
 
     const payload = { model: targetModel, prompt: promptText, size: CONFIG.imageResolution || '1280x720', quality: CONFIG.imageQuality || 'standard', style: CONFIG.imageStyle || 'natural' };
     if (lastGeneratedImageUrl) payload.image = lastGeneratedImageUrl;
@@ -3143,12 +3225,10 @@
       contentEl.appendChild(imgEl); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null));
 
       lastGeneratedImageUrl = imageUrl;
-      conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl }); resetInput();
+      conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl, turnId }); resetInput();
     } catch (err) {
       if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); resetInput(); return; }
       setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput();
-    } finally { 
-      activeAbortController = null; 
     }
   }
 
