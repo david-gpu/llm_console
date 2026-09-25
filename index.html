@@ -45,7 +45,7 @@
                style-src 'self' 'unsafe-inline';
                img-src data: blob: https:;
                media-src blob:;
-               connect-src https://api.deepinfra.com https://api.tavily.com;">
+               connect-src https://api.deepinfra.com https://api.tavily.com https://sponsor.ajay.app;">
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
         integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
         crossorigin="anonymous"></script>
@@ -1656,7 +1656,8 @@
         `Use get_youtube_transcript for YouTube videos. NEVER use web_search or fetch_web_page for YouTube.\n` +
         `Your summaries of YouTube videos should be free of introductions like 'This video is...' ` +
         `or boilerplate like the channel's name or the number of views. Start right away with the meat of it.\n` +
-        `The summaries must be written in plain prose that is well-suited to be read aloud by a TTS engine. ` +
+        `The summaries must be written in plain prose that is well-suited to be read aloud by a TTS engine, ` +
+        `rather than a collection of bullet points. Do not include sponsored content, self-promotions, and the like.\n` +
         `Include timestamps with links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n` +
         `You may perform up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
     }
@@ -1667,7 +1668,7 @@
            `${toolLine}\n\n` +
            `# User's Instructions\n`;
   }
-
+  
   /*
    * ==========================================================================
    * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed)
@@ -1679,6 +1680,90 @@
    * caption track -- what Tavily's crawler can retrieve is what we get.
    * ==========================================================================
    */
+  /**
+   * Converts a timestamp string (HH:MM:SS, MM:SS, or S) into total seconds.
+   */
+  function parseTimestampToSeconds(timestampStr) {
+    if (!timestampStr) return null;
+    const parts = timestampStr.split(':').map(Number);
+    if (parts.some(isNaN)) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 1) return parts[0];
+    return null;
+  }
+
+  /**
+   * Fetches skip segments from the SponsorBlock API for a given video ID.
+   * Returns an array of interval objects or an empty array on 404/error.
+   */
+  async function fetchSponsorBlockSegments(videoId, signal = null) {
+    const categories = JSON.stringify([
+      'sponsor',          // Paid promotions
+      'selfpromo',        // Self-promotion (merch, etc)
+      'exclusive_access', // Segments promoting member-exclusive bonus material
+      'interaction',      // "Please like & subscribe!"
+      'intro',            // Trite opening title sequences
+      'preview',          // Teasers and hooks at the beginning of the video
+      'outro',            // Closing credits, Patreon lists, sign-offs
+      'filler'            // Tangential rants and gags
+    ]);
+    const url = `https://sponsor.ajay.app/api/skipSegments?videoID=${encodeURIComponent(videoId)}&categories=${encodeURIComponent(categories)}`;
+    
+    try {
+      const res = await fetch(url, { method: 'GET', signal });
+      if (!res.ok) return []; // HTTP 404 indicates no skip segments exist
+      const data = await res.json();
+      return data.map(item => ({
+        category: item.category,
+        start: item.segment[0],
+        end: item.segment[1]
+      }));
+    } catch (e) {
+      console.warn('SponsorBlock fetch skipped or failed:', e);
+      return [];
+    }
+  }
+
+  /**
+   * Filters lines out of the extracted transcript text that fall within
+   * SponsorBlock skip time ranges.
+   */
+  function filterTranscriptWithSponsorBlock(content, segments) {
+    if (!segments || segments.length === 0) {
+      return { filteredContent: content, skippedCount: 0, skippedDuration: 0 };
+    }
+
+    const lines = content.split('\n');
+    const filteredLines = [];
+    let skippedCount = 0;
+    let currentTime = 0;
+    const totalSkippedDuration = segments.reduce((acc, seg) => acc + (seg.end - seg.start), 0);
+
+    for (const line of lines) {
+      // Matches patterns like [01:23], (12:34), 1:02:03, or 05:22
+      const match = line.match(/(?:\[\vert{}\()?(\d{1,2}:)?(\d{1,2}):(\d{2})(?:\]\vert{}\))?/);
+      if (match) {       const parsedSeconds = parseTimestampToSeconds(match[0].replace(/[\[\]\(\)]/g, ''));
+        if (parsedSeconds !== null) {
+          currentTime = parsedSeconds;
+        }
+      }
+
+      const isSkipped = segments.some(seg => currentTime >= seg.start && currentTime <= seg.end);
+      if (isSkipped) {
+        skippedCount++;
+      } else {
+        filteredLines.push(line);
+      }
+    }
+
+    return {
+      filteredContent: filteredLines.join('\n'),
+      skippedCount,
+      skippedDuration: Math.round(totalSkippedDuration)
+    };
+  }
+
   /* Strict extractor: recognized shapes are a bare 11-char video ID or any
    * of the standard watch/embed/short/share URL forms. Anything else is NOT
    * a YouTube target and returns null -- the caller reports a proper tool
@@ -1692,29 +1777,41 @@
     return match ? match[1] : null;
   }
 
+  /* Fetch the transcript of a Youtube video, removing all the segments flagged by SponsorBlock */
   async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
     const videoId = extractYouTubeVideoId(videoInput);
     if (!videoId) throw new Error("Invalid YouTube Video ID or URL");
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
 
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const results = await executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal);
-    if (!Array.isArray(results) || results.length === 0) {
+
+    // Execute Tavily extraction and SponsorBlock segment retrieval in parallel
+    const [extractResults, segments] = await Promise.all([
+      executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal),
+      fetchSponsorBlockSegments(videoId, signal)
+    ]);
+
+    if (!Array.isArray(extractResults) || extractResults.length === 0) {
       throw new Error("No content returned for the video page.");
     }
 
-    const content = results
+    const rawContent = extractResults
       .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
       .filter(Boolean)
       .join('\n\n');
-    if (!content) throw new Error("Video page was fetched but contained no extractable content.");
+
+    if (!rawContent) throw new Error("Video page was fetched but contained no extractable content.");
+
+    const { filteredContent, skippedCount, skippedDuration } = filterTranscriptWithSponsorBlock(rawContent, segments);
 
     return JSON.stringify({
       video_id: videoId,
       language: preferredLang,
       source: 'tavily_extract',
       page_url: watchUrl,
-      content
+      sponsorblock_segments_found: segments.length,
+      sponsorblock_seconds_removed: skippedDuration,
+      content: filteredContent
     });
   }
 
