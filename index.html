@@ -1671,15 +1671,71 @@
   
   /*
    * ==========================================================================
-   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed)
+   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed) — WORD-LEVEL FILTERING
    * YouTube does not serve Access-Control-Allow-Origin on its pages or its
    * InnerTube/caption endpoints, so no browser fetch() can ever read the
    * response body (CORS), regardless of CSP. All YouTube egress therefore
    * goes through Tavily's server-side extractor. NOTE: this returns the
    * extracted page content for the watch URL, not a guaranteed verbatim
    * caption track -- what Tavily's crawler can retrieve is what we get.
+   *
+   * This build replaces line-based SponsorBlock filtering with WORD-level
+   * filtering based on interpolated word timings:
+   *   - Each caption line's spoken span is estimated from its timestamp,
+   *     the next line's timestamp, the word count, and a global words/second
+   *     rate estimated from the caption track itself (median of per-line
+   *     rates, so silences do not skew it).
+   *   - Words are allocated equal slices of the line's estimated span, so
+   *     we get sub-second estimates of when each word is spoken.
+   *   - A word is removed when its estimated midpoint falls inside any
+   *     SponsorBlock segment; lines left empty are dropped entirely.
+   *   - SponsorBlock segments are coalesced the way playback experiences
+   *     them: the server already filters submissions by vote/view
+   *     thresholds, so all returned segments are kept, deduplicated by
+   *     UUID, and merged into union intervals when they overlap or nearly
+   *     touch. Weighted votes are logged for inspection.
+   *   - The metadata preamble (title/description) is left untouched; only
+   *     the "### Transcript" section is filtered.
+   *   - "sponsorblock_seconds_removed" reports the ACTUAL estimated seconds
+   *     of speech removed, derived from the removed words' spans.
    * ==========================================================================
    */
+  const YT_TOOL_DEBUG = false;            // master switch for all logging
+  const YT_LOG_MAX_TEXT = 4000;          // max characters dumped per log entry
+  // Word-timing estimation parameters
+  const YT_DEFAULT_WORD_RATE = 2.6;      // words/sec fallback (typical English speech)
+  const YT_RATE_CLAMP_MIN = 1.2;         // sanity bounds on the estimated rate
+  const YT_RATE_CLAMP_MAX = 8.0;
+  const YT_MIN_LINE_DURATION = 0.25;     // s; a line never spans less than this
+  const YT_SEGMENT_MERGE_GAP = 0.5;      // s; segments closer than this are merged
+  const YT_MIN_WEIGHTED_VOTES = 0;       // server already thresholds; raise to be stricter
+  const YT_LOCKED_VOTE_BONUS = 500;      // mirrors the official extension's locked-segment bonus
+  const YT_MIN_KEPT_WORDS = 2;           // lines kept with fewer words than this are
+  const YT_MIN_KEPT_FRACTION = 0.2;      // dropped as orphan fragments (or fewer than
+                                         // 20% of original words kept)
+
+  /**
+   * Central logger. Timestamped (ISO 8601) so call ordering and parallelism
+   * can be verified by comparing the millisecond fields in the console.
+   */
+  function ytLog(level, message, data = undefined) {
+    if (!YT_TOOL_DEBUG) return;
+    const prefix = `[YT-TOOL][${new Date().toISOString()}]`;
+    if (data !== undefined) {
+      console[level === 'warn' ? 'warn' : level === 'error' ? 'error' : 'log'](prefix, message, data);
+    } else {
+      console[level === 'warn' ? 'warn' : level === 'error' ? 'error' : 'log'](prefix, message);
+    }
+  }
+
+  /** Truncate long strings for console readability without losing evidence. */
+  function ytSnippet(text, max = YT_LOG_MAX_TEXT) {
+    if (typeof text !== 'string') {
+      try { text = JSON.stringify(text); } catch { text = String(text); }
+    }
+    return text.length <= max ? text : text.slice(0, max) + `… [+${text.length - max} chars truncated]`;
+  }
+
   /**
    * Converts a timestamp string (HH:MM:SS, MM:SS, or S) into total seconds.
    */
@@ -1693,9 +1749,263 @@
     return null;
   }
 
+  /** Formats seconds back to the [M:SS] / [H:MM:SS] caption style. */
+  function formatSecondsAsTimestamp(totalSeconds) {
+    const s = Math.max(0, Math.floor(totalSeconds));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+    return `${m}:${String(ss).padStart(2, '0')}`;
+  }
+
+  /**
+   * Scans text for timestamp-like tokens and reports their granularity.
+   */
+  function analyzeTimestampGranularity(content, label = 'content') {
+    const matches = content.match(/\d{1,2}:\d{2}(?::\d{2})?/g) || [];
+    const sample = matches.slice(0, 20);
+    const withHours = matches.filter(m => /^\d{1,2}:\d{2}:\d{2}$/.test(m)).length;
+    ytLog('info', `[Q1] Timestamp granularity of ${label}:`, {
+      scope: label,
+      totalTimestampTokensFound: matches.length,
+      tokensWithHours: withHours,
+      tokensMinutesSecondsOnly: matches.length - withHours,
+      firstTokensSample: sample,
+      monotonic: sample.every((m, i, arr) =>
+        i === 0 || (parseTimestampToSeconds(m) ?? 0) >= (parseTimestampToSeconds(arr[i - 1]) ?? 0))
+    });
+  }
+
+  /**
+   * Splits the extracted content at the "### Transcript" heading into a
+   * preamble (title/description metadata, left untouched) and the transcript
+   * body. The heading is part of the expected Tavily format; if it is
+   * missing, we fail loudly rather than guess at the structure.
+   */
+  function splitContentAtTranscriptHeading(content) {
+    const marker = '### Transcript';
+    const idx = content.indexOf(marker);
+    if (idx === -1) {
+      throw new Error(
+        `Tavily extract does not contain a "${marker}" heading -- ` +
+        'unexpected format, cannot isolate the transcript.'
+      );
+    }
+    const preamble = content.slice(0, idx).trimEnd();
+    const transcript = content.slice(idx + marker.length).replace(/^\s*\n/, '');
+    ytLog('info', '[Q4] Content split at transcript heading.', {
+      preambleLength: preamble.length,
+      transcriptLength: transcript.length
+    });
+    return { preamble, transcript };
+  }
+
+  // The caption-line grammar Tavily emits: a bracketed timestamp (with or
+  // without an hours component) at the very start of the line, followed by
+  // a space and the caption text. Anything else in the transcript section
+  // is a contract violation and fails loudly.
+  const YT_CAPTION_LINE_RE = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\] (.*)$/;
+
+  /**
+   * Parses the transcript body into entries: { time, words[] }, exploiting
+   * the KNOWN structure Tavily provides: after the "### Transcript" heading,
+   * every caption line starts with a bracketed "[M:SS]" (or "[H:MM:SS]")
+   * timestamp. There is NO fallback: any non-blank line that does not match
+   * this grammar, or any timestamp that moves backwards, throws. We will
+   * deal with format drift if and when it happens.
+   */
+  function parseTranscriptEntries(transcript) {
+    const lines = transcript.split('\n');
+    const entries = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;  // blank lines are fine
+      const m = line.match(YT_CAPTION_LINE_RE);
+      if (!m) {
+        throw new Error(
+          `Transcript line ${i + 1} does not match the expected "[M:SS] caption" ` +
+          `format: ${JSON.stringify(line.slice(0, 120))}`
+        );
+      }
+      const time = parseTimestampToSeconds(m[1]);
+      if (time === null) {
+        throw new Error(
+          `Transcript line ${i + 1} has an unparseable timestamp: ${JSON.stringify(line.slice(0, 120))}`
+        );
+      }
+      const prev = entries[entries.length - 1];
+      if (prev && time < prev.time) {
+        throw new Error(
+          `Transcript line ${i + 1} timestamp moved backwards ` +
+          `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)}): ` +
+          `${JSON.stringify(line.slice(0, 120))}`
+        );
+      }
+      entries.push({ time, rawText: m[2] });
+    }
+
+    if (entries.length === 0) {
+      throw new Error('Transcript section contained no caption lines.');
+    }
+
+    ytLog('info', '[Q4] Transcript parsed using known structure.', {
+      captionEntries: entries.length,
+      firstEntryTime: formatSecondsAsTimestamp(entries[0].time),
+      lastEntryTime: formatSecondsAsTimestamp(entries[entries.length - 1].time)
+    });
+
+    return entries.map(e => ({
+      time: e.time,
+      words: e.rawText.trim().split(/\s+/).filter(Boolean)
+    }));
+  }
+
+  /**
+   * Estimates the speaker's words/second rate from the caption track:
+   * for each line, rate = wordCount / (nextLineTimestamp - lineTimestamp).
+   * The MEDIAN of these per-interval rates is used so pauses/silences
+   * (which inflate a line's gap) do not drag the estimate down the way a
+   * naive mean over the whole video would. Clamped to a plausible range.
+   */
+  function estimateWordRate(entries) {
+    const rates = [];
+    for (let i = 0; i < entries.length - 1; i++) {
+      const gap = entries[i + 1].time - entries[i].time;
+      if (gap > 0 && entries[i].words.length > 0) {
+        const r = entries[i].words.length / gap;
+        if (r >= 0.5 && r <= 10) rates.push(r);
+      }
+    }
+    let rate = YT_DEFAULT_WORD_RATE;
+    let method = 'fallback default';
+    if (rates.length > 0) {
+      rates.sort((a, b) => a - b);
+      rate = rates[Math.floor(rates.length / 2)];
+      method = `median of ${rates.length} per-line rates`;
+    }
+    rate = Math.min(YT_RATE_CLAMP_MAX, Math.max(YT_RATE_CLAMP_MIN, rate));
+    ytLog('info', '[Q4] Speaking rate estimated.', {
+      method,
+      estimatedWordsPerSecond: Number(rate.toFixed(3)),
+      perLineRatesSample: rates.slice(0, 10).map(r => Number(r.toFixed(2)))
+    });
+    return rate;
+  }
+
+  /**
+   * Builds a word-level timeline. For each caption line:
+   *   naturalEnd = lineTime + wordCount / rate          (how long speech takes)
+   *   lineEnd    = min(naturalEnd, nextLineTimestamp)   (next speech starts then;
+   *                                                       trailing silence respected)
+   * For the last line, videoDuration (from SponsorBlock) bounds it.
+   * Each word then receives an equal slice [start, end] of the line's span,
+   * yielding sub-second estimates of when every word is spoken.
+   */
+  function buildWordTimeline(entries, rate, videoDuration) {
+    const timeline = entries.map((e, i) => {
+      const naturalEnd = e.time + (e.words.length / rate);
+      const nextTime = (i + 1 < entries.length) ? entries[i + 1].time : null;
+      let end;
+      if (nextTime !== null) {
+        end = Math.min(naturalEnd, nextTime);
+      } else if (typeof videoDuration === 'number' && videoDuration > e.time) {
+        end = Math.min(naturalEnd, videoDuration);
+      } else {
+        end = naturalEnd;
+      }
+      end = Math.max(end, e.time + YT_MIN_LINE_DURATION);
+      const wordSpan = (end - e.time) / Math.max(1, e.words.length);
+      const words = e.words.map((w, k) => ({
+        word: w,
+        start: e.time + k * wordSpan,
+        end: e.time + (k + 1) * wordSpan
+      }));
+      return { time: e.time, end, words };
+    });
+    ytLog('info', '[Q4] Word timeline built.', {
+      lines: timeline.length,
+      sampleFirst12Lines: timeline.slice(0, 12).map((l, idx) => ({
+        line: idx + 1,
+        time: formatSecondsAsTimestamp(l.time),
+        estimatedEnd: Number(l.end.toFixed(2)),
+        words: l.words.length
+      }))
+    });
+    return timeline;
+  }
+
+  /**
+   * Coalesces SponsorBlock submissions into one set of skip intervals, the
+   * way the official system experiences them in playback: the server has
+   * already filtered submissions by its vote/view thresholds (we do not
+   * see rejected ones), so we keep everything returned, deduplicate by
+   * UUID, and merge overlapping / near-adjacent intervals into union
+   * intervals. Weighted votes (votes + locked bonus, mirroring the
+   * extension's convention) are computed for inspection and an optional
+   * operator threshold.
+   */
+  function coalesceSponsorBlockSegments(rawItems) {
+    const byUuid = new Map();
+    for (const item of rawItems) {
+      if (item.uuid && !byUuid.has(item.uuid)) byUuid.set(item.uuid, item);
+    }
+    const unique = [...byUuid.values()];
+    const scored = unique.map(item => ({
+      category: item.category,
+      start: item.start,
+      end: item.end,
+      uuid: item.uuid,
+      votes: item.votes,
+      locked: item.locked,
+      weightedVotes: (item.votes || 0) + (item.locked ? YT_LOCKED_VOTE_BONUS : 0)
+    }));
+    const kept = scored.filter(s => s.weightedVotes >= YT_MIN_WEIGHTED_VOTES);
+    const dropped = scored.filter(s => s.weightedVotes < YT_MIN_WEIGHTED_VOTES);
+    if (dropped.length > 0) {
+      ytLog('warn', `[Q2b] ${dropped.length} segment(s) below YT_MIN_WEIGHTED_VOTES discarded:`, dropped);
+    }
+    const sorted = [...kept].sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const seg of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && seg.start <= last.end + YT_SEGMENT_MERGE_GAP) {
+        last.end = Math.max(last.end, seg.end);
+        last.categories.add(seg.category);
+        last.uuids.push(seg.uuid);
+        last.weightedVotes += seg.weightedVotes;
+      } else {
+        merged.push({
+          start: seg.start,
+          end: seg.end,
+          categories: new Set([seg.category]),
+          uuids: [seg.uuid],
+          weightedVotes: seg.weightedVotes
+        });
+      }
+    }
+    const result = merged.map(m => ({
+      start: m.start,
+      end: m.end,
+      categories: [...m.categories],
+      contributingSegments: m.uuids.length,
+      weightedVotes: m.weightedVotes
+    }));
+    ytLog('info', `[Q2b] Segment coalescing complete: ${unique.length} unique submission(s) -> ${result.length} merged interval(s).`, {
+      rawSubmissions: scored,
+      mergedIntervals: result
+    });
+    return result;
+  }
+
   /**
    * Fetches skip segments from the SponsorBlock API for a given video ID.
-   * Returns an array of interval objects or an empty array on 404/error.
+   * This call goes DIRECTLY to sponsor.ajay.app (which serves CORS
+   * headers) -- only YouTube egress needs Tavily. Returns:
+   *   { segments: coalesced intervals, videoDuration, rawSegmentCount }
+   * or { segments: [], videoDuration: null, rawSegmentCount: 0 } on
+   * 404/error.
    */
   async function fetchSponsorBlockSegments(videoId, signal = null) {
     const categories = JSON.stringify([
@@ -1709,89 +2019,304 @@
       'filler'            // Tangential rants and gags
     ]);
     const url = `https://sponsor.ajay.app/api/skipSegments?videoID=${encodeURIComponent(videoId)}&categories=${encodeURIComponent(categories)}`;
-    
+
+    ytLog('info', '[Q2] SponsorBlock request starting.', {
+      url,
+      videoId,
+      categoriesRequested: JSON.parse(categories),
+      startedAtMs: performance.now()
+    });
+
     try {
       const res = await fetch(url, { method: 'GET', signal });
-      if (!res.ok) return []; // HTTP 404 indicates no skip segments exist
-      const data = await res.json();
-      return data.map(item => ({
-        category: item.category,
-        start: item.segment[0],
-        end: item.segment[1]
-      }));
+
+      ytLog(res.ok ? 'info' : 'warn', `[Q2] SponsorBlock HTTP ${res.status} ${res.statusText}.`, {
+        ok: res.ok,
+        contentType: res.headers.get('content-type'),
+        finishedAtMs: performance.now()
+      });
+
+      if (res.status === 404) {
+        ytLog('info', '[Q2] SponsorBlock: 404 — no segments exist for this video. Returning [].');
+        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
+      }
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '<body unreadable>');
+        ytLog('error', `[Q2] SponsorBlock: unexpected HTTP ${res.status}. Raw body:`, ytSnippet(bodyText, 1000));
+        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
+      }
+
+      const rawBody = await res.text();
+      ytLog('info', '[Q2] SponsorBlock raw response body:', ytSnippet(rawBody));
+
+      let data;
+      try {
+        data = JSON.parse(rawBody);
+      } catch (e) {
+        ytLog('error', '[Q2] SponsorBlock: response is not valid JSON.', { error: String(e) });
+        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
+      }
+
+      if (!Array.isArray(data)) {
+        ytLog('error', '[Q2] SponsorBlock: expected a JSON array but got a different shape.', {
+          actualType: typeof data,
+          keys: data && typeof data === 'object' ? Object.keys(data) : null
+        });
+        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
+      }
+
+      const validItems = [];
+      let malformed = 0;
+      let videoDuration = null;
+      for (const item of data) {
+        const seg = item && item.segment;
+        const start = seg && seg[0], end = seg && seg[1];
+        if (typeof start === 'number' && typeof end === 'number' && end >= start && start >= 0) {
+          validItems.push({
+            category: item.category,
+            start,
+            end,
+            uuid: item.UUID,
+            votes: item.votes,
+            locked: item.locked,
+            videoDuration: item.videoDuration
+          });
+          if (typeof item.videoDuration === 'number') videoDuration = item.videoDuration;
+        } else {
+          malformed++;
+          ytLog('warn', '[Q2] SponsorBlock: discarding malformed segment entry:', item);
+        }
+      }
+
+      ytLog('info', `[Q2] SponsorBlock: ${validItems.length} valid submission(s), ${malformed} malformed.`, {
+        validItems,
+        videoDuration
+      });
+
+      const segments = coalesceSponsorBlockSegments(validItems);
+      return { segments, videoDuration, rawSegmentCount: validItems.length };
     } catch (e) {
-      console.warn('SponsorBlock fetch skipped or failed:', e);
-      return [];
+      if (e && (e.name === 'AbortError' || (signal && signal.aborted))) {
+        ytLog('warn', '[Q2] SponsorBlock fetch aborted by caller.');
+      } else {
+        ytLog('error', '[Q2] SponsorBlock fetch failed with a network-level error:', e);
+      }
+      return { segments: [], videoDuration: null, rawSegmentCount: 0 };
     }
   }
 
   /**
-   * Filters lines out of the extracted transcript text that fall within
-   * SponsorBlock skip time ranges.
+   * Removes, per word, every word whose estimated spoken midpoint falls
+   * inside a coalesced SponsorBlock segment. Lines left empty -- or left
+   * as trivial orphan fragments (e.g. a lone "Hey," where a segment began
+   * mid-line) -- are dropped entirely. Returns the rebuilt transcript text
+   * plus stats.
    */
-  function filterTranscriptWithSponsorBlock(content, segments) {
-    if (!segments || segments.length === 0) {
-      return { filteredContent: content, skippedCount: 0, skippedDuration: 0 };
-    }
+  function filterWordsBySegments(timeline, segments) {
+    const removalLog = [];
+    const droppedFragmentLog = [];
+    let removedWordsTotal = 0;
+    let removedSeconds = 0;
+    let linesDroppedEntirely = 0;
+    let linesDroppedAsFragments = 0;
 
-    const lines = content.split('\n');
-    const filteredLines = [];
-    let skippedCount = 0;
-    let currentTime = 0;
-    const totalSkippedDuration = segments.reduce((acc, seg) => acc + (seg.end - seg.start), 0);
-
-    for (const line of lines) {
-      // Matches patterns like [01:23], (12:34), 1:02:03, or 05:22
-      const match = line.match(/(?:\[\vert{}\()?(\d{1,2}:)?(\d{1,2}):(\d{2})(?:\]\vert{}\))?/);
-      if (match) {       const parsedSeconds = parseTimestampToSeconds(match[0].replace(/[\[\]\(\)]/g, ''));
-        if (parsedSeconds !== null) {
-          currentTime = parsedSeconds;
+    const rebuiltLines = [];
+    for (let i = 0; i < timeline.length; i++) {
+      const line = timeline[i];
+      const keptWords = [];
+      for (const w of line.words) {
+        const mid = (w.start + w.end) / 2;
+        const hit = segments.find(seg => mid >= seg.start && mid <= seg.end);
+        if (hit) {
+          removedWordsTotal++;
+          removedSeconds += (w.end - w.start);
+          if (removalLog.length < 60) {
+            removalLog.push({
+              line: i + 1,
+              lineTime: formatSecondsAsTimestamp(line.time),
+              word: w.word,
+              wordMidpointSeconds: Number(mid.toFixed(2)),
+              matchedCategories: hit.categories
+            });
+          }
+        } else {
+          keptWords.push(w.word);
         }
       }
-
-      const isSkipped = segments.some(seg => currentTime >= seg.start && currentTime <= seg.end);
-      if (isSkipped) {
-        skippedCount++;
-      } else {
-        filteredLines.push(line);
+      if (line.words.length === 0) continue;
+      if (keptWords.length === 0) {
+        // Whole line inside the segments.
+        linesDroppedEntirely++;
+        continue;
       }
+      const keptFraction = keptWords.length / line.words.length;
+      if (keptWords.length <= YT_MIN_KEPT_WORDS || keptFraction < YT_MIN_KEPT_FRACTION) {
+        // Orphan fragment: a segment began mid-line and left a token stub
+        // (e.g. "[4:00] Hey,"). The kept words count as removed speech too.
+        linesDroppedAsFragments++;
+        removedWordsTotal += keptWords.length;
+        removedSeconds += keptWords.length * ((line.end - line.time) / Math.max(1, line.words.length));
+        if (droppedFragmentLog.length < 20) {
+          droppedFragmentLog.push({
+            line: i + 1,
+            lineTime: formatSecondsAsTimestamp(line.time),
+            originalWordCount: line.words.length,
+            keptStub: keptWords.join(' '),
+            keptFraction: Number(keptFraction.toFixed(2))
+          });
+        }
+        continue;
+      }
+      rebuiltLines.push(`[${formatSecondsAsTimestamp(line.time)}] ${keptWords.join(' ')}`);
+    }
+    // Audit log: lines that were PARTIALLY cut (some words kept, some
+    // removed) -- these are the mid-video excisions worth eyeballing.
+    const partialLines = [];
+    for (let i = 0; i < timeline.length; i++) {
+      const line = timeline[i];
+      const removedInLine = line.words.filter(w => {
+        const mid = (w.start + w.end) / 2;
+        return segments.some(seg => mid >= seg.start && mid <= seg.end);
+      }).length;
+      if (removedInLine > 0 && removedInLine < line.words.length) {
+        partialLines.push({
+          line: i + 1,
+          lineTime: formatSecondsAsTimestamp(line.time),
+          originalWordCount: line.words.length,
+          wordsRemoved: removedInLine,
+          rebuiltLine: rebuiltLines.find(l => l.startsWith(`[${formatSecondsAsTimestamp(line.time)}]`)) || '(dropped as fragment)'
+        });
+      }
+    }
+    ytLog('info', `[Q4] Partially-cut lines (mid-video excisions): ${partialLines.length} found.`, partialLines);
+
+    ytLog('info', '[Q4] Word-level filtering complete.', {
+      captionLines: timeline.length,
+      wordsRemoved: removedWordsTotal,
+      estimatedSecondsOfSpeechRemoved: Number(removedSeconds.toFixed(2)),
+      linesDroppedEntirely,
+      linesDroppedAsFragments,
+      linesKept: rebuiltLines.length
+    });
+    ytLog('info', '[Q4] Removed words (up to 60, with estimated midpoints):', removalLog);
+    if (linesDroppedAsFragments > 0) {
+      ytLog('info', '[Q4] Orphan fragment lines dropped (stub kept by the midpoint rule):', droppedFragmentLog);
     }
 
     return {
-      filteredContent: filteredLines.join('\n'),
-      skippedCount,
-      skippedDuration: Math.round(totalSkippedDuration)
+      filteredTranscript: rebuiltLines.join('\n'),
+      removedWordsTotal,
+      removedSeconds,
+      linesDroppedEntirely,
+      linesDroppedAsFragments
     };
   }
 
   /* Strict extractor: recognized shapes are a bare 11-char video ID or any
    * of the standard watch/embed/short/share URL forms. Anything else is NOT
    * a YouTube target and returns null -- the caller reports a proper tool
-   * error instead of best-effort fetching a garbage watch URL (which
-   * "succeeded" by returning YouTube's error page as transcript content). */
+   * error instead of best-effort fetching a garbage watch URL. */
   function extractYouTubeVideoId(input) {
     if (!input) return null;
     const cleaned = input.trim();
     if (/^[a-zA-Z0-9_-]{11}$/.test(cleaned)) return cleaned;
     const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-    return match ? match[1] : null;
+    const videoId = match ? match[1] : null;
+    ytLog(videoId ? 'info' : 'warn', `[Q0] Video ID extraction: "${cleaned}" -> ${JSON.stringify(videoId)}`);
+    return videoId;
+  }
+
+  /**
+   * Tavily extract wrapper with full request/response logging. Handles both
+   * a bare array (legacy/unwrapped shape) and the standard object shape
+   * { results, failed_results, response_time, request_id }.
+   */
+  async function executeTavilyExtractWithLogging(watchUrl, signal) {
+    const t0 = performance.now();
+    ytLog('info', '[Q1] Tavily extract request starting.', {
+      endpoint: 'extract',
+      urls: [watchUrl],
+      startedAtMs: t0
+    });
+
+    const rawResponse = await executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal);
+    const elapsed = Math.round(performance.now() - t0);
+
+    ytLog('info', `[Q1] Tavily returned in ${elapsed} ms. Raw value type: ${Array.isArray(rawResponse) ? 'Array' : typeof rawResponse}`);
+    ytLog('info', '[Q1] Raw Tavily response (as received by this code):', ytSnippet(rawResponse));
+
+    let results;
+    if (Array.isArray(rawResponse)) {
+      ytLog('info', '[Q1] Tavily response is a bare ARRAY (legacy/unwrapped shape).');
+      results = rawResponse;
+    } else if (rawResponse && typeof rawResponse === 'object') {
+      const obj = rawResponse;
+      if (Object.prototype.hasOwnProperty.call(obj, 'results') || Object.prototype.hasOwnProperty.call(obj, 'failed_results')) {
+        ytLog('info', '[Q1] Tavily response is the standard OBJECT shape.', {
+          resultsCount: Array.isArray(obj.results) ? obj.results.length : null,
+          failedResults: Array.isArray(obj.failed_results) ? obj.failed_results : null,
+          responseTime: obj.response_time,
+          requestId: obj.request_id
+        });
+        if (Array.isArray(obj.failed_results) && obj.failed_results.length > 0) {
+          ytLog('warn', '[Q1] Tavily reported failed URLs — an HTTP 200 can still carry failures:', obj.failed_results);
+        }
+        results = Array.isArray(obj.results) ? obj.results : [];
+      } else {
+        ytLog('warn', '[Q1] Tavily response is an object but has neither "results" nor "failed_results".', {
+          keys: Object.keys(obj)
+        });
+        results = [obj];
+      }
+    } else {
+      ytLog('error', '[Q1] Tavily response is neither an array nor an object.', { value: rawResponse });
+      results = [];
+    }
+
+    for (const r of results) {
+      const contentField = typeof r === 'string' ? '(bare string)' : (r.raw_content !== undefined ? 'raw_content' : r.content !== undefined ? 'content' : '(none)');
+      ytLog('info', '[Q1] Individual Tavily result:', {
+        url: r && r.url,
+        urlMatchesRequestedWatchUrl: r && r.url === watchUrl,
+        contentFieldUsed: contentField,
+        contentLength: typeof r === 'string' ? r.length : ((r.raw_content || r.content || '')).length,
+        hasImages: !!(r && r.images && r.images.length)
+      });
+    }
+
+    return results;
   }
 
   /* Fetch the transcript of a Youtube video, removing all the segments flagged by SponsorBlock */
   async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
+    const overallT0 = performance.now();
     const videoId = extractYouTubeVideoId(videoInput);
     if (!videoId) throw new Error("Invalid YouTube Video ID or URL");
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
 
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    ytLog('info', '[Q0] fetchYouTubeTranscript starting.', { videoInput, videoId, preferredLang, watchUrl });
 
-    // Execute Tavily extraction and SponsorBlock segment retrieval in parallel
-    const [extractResults, segments] = await Promise.all([
-      executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal),
+    const tavilyStart = performance.now();
+    ytLog('info', '[Q3] Launching Tavily + SponsorBlock concurrently via Promise.all.', {
+      tavilyStartMs: tavilyStart
+    });
+
+    const [extractResults, sbResult] = await Promise.all([
+      executeTavilyExtractWithLogging(watchUrl, signal),
       fetchSponsorBlockSegments(videoId, signal)
     ]);
+    const { segments: mergedSegments, videoDuration, rawSegmentCount } = sbResult;
+
+    ytLog('info', '[Q3] Both calls resolved.', {
+      tavilyStartMs: tavilyStart,
+      sponsorblockStartMs: '(see [Q2] "startedAtMs" in the first SponsorBlock log above; ' +
+        'identical value = same-millisecond launch = parallel)',
+      totalElapsedMs: Math.round(performance.now() - tavilyStart)
+    });
 
     if (!Array.isArray(extractResults) || extractResults.length === 0) {
+      ytLog('error', '[Q1] No content returned for the video page. Throwing.', { extractResults });
       throw new Error("No content returned for the video page.");
     }
 
@@ -1800,19 +2325,78 @@
       .filter(Boolean)
       .join('\n\n');
 
+    ytLog('info', '[Q1] Raw Tavily content after joining result parts:', {
+      length: rawContent.length,
+      previewFirst1000Chars: ytSnippet(rawContent, 1000),
+      previewLast500Chars: rawContent.slice(-500)
+    });
+
     if (!rawContent) throw new Error("Video page was fetched but contained no extractable content.");
 
-    const { filteredContent, skippedCount, skippedDuration } = filterTranscriptWithSponsorBlock(rawContent, segments);
+    // Keep the metadata preamble untouched; word-filter only the transcript.
+    const { preamble, transcript } = splitContentAtTranscriptHeading(rawContent);
+    analyzeTimestampGranularity(preamble, 'preamble (description section)');
+    analyzeTimestampGranularity(transcript, 'transcript section');
 
-    return JSON.stringify({
+    let finalContent = rawContent;       // fallback: pass-through
+    let removedWordsTotal = 0;
+    let removedSeconds = 0;
+    let linesDroppedEntirely = 0;
+
+    const entries = parseTranscriptEntries(transcript);
+    if (entries.length === 0) {
+      ytLog('warn', '[Q4] No timestamped caption entries found in the transcript section. ' +
+        'Word-level filtering is impossible; returning content unfiltered.');
+    } else if (mergedSegments.length === 0) {
+      ytLog('info', '[Q4] Zero SponsorBlock segments after coalescing. Returning content unfiltered.');
+    } else {
+      const rate = estimateWordRate(entries);
+      const timeline = buildWordTimeline(entries, rate, videoDuration);
+      const filtered = filterWordsBySegments(timeline, mergedSegments);
+      removedWordsTotal = filtered.removedWordsTotal;
+      removedSeconds = filtered.removedSeconds;
+      linesDroppedEntirely = filtered.linesDroppedEntirely;
+      const linesDroppedAsFragments = filtered.linesDroppedAsFragments;
+      // The "### Transcript" heading is guaranteed present (its absence
+      // throws in splitContentAtTranscriptHeading), so re-attach it
+      // unconditionally between the untouched preamble and the filtered
+      // transcript.
+      const parts = [];
+      if (preamble) parts.push(preamble);
+      parts.push('### Transcript\n' + filtered.filteredTranscript);
+      finalContent = parts.join('\n\n');
+    }
+
+    const nominalCoverage = mergedSegments.reduce((a, s) => a + (s.end - s.start), 0);
+    const finalPayload = JSON.stringify({
       video_id: videoId,
       language: preferredLang,
       source: 'tavily_extract',
       page_url: watchUrl,
-      sponsorblock_segments_found: segments.length,
-      sponsorblock_seconds_removed: skippedDuration,
-      content: filteredContent
+      sponsorblock_segments_found: rawSegmentCount,
+      sponsorblock_segments_after_coalescing: mergedSegments.length,
+      sponsorblock_seconds_removed: Math.round(removedSeconds),
+      sponsorblock_segment_coverage_seconds: Math.round(nominalCoverage),
+      sponsorblock_words_removed: removedWordsTotal,
+      sponsorblock_lines_dropped: linesDroppedEntirely,
+      content: finalContent
     });
+
+    ytLog('info', '[Q5] FINAL payload returned to tool caller.', {
+      totalWallClockMs: Math.round(performance.now() - overallT0),
+      payloadLength: finalPayload.length,
+      rawContentLength: rawContent.length,
+      finalContentLength: finalContent.length,
+      removedCharacters: rawContent.length - finalContent.length,
+      wordsRemoved: removedWordsTotal,
+      estimatedSecondsOfSpeechRemoved: Number(removedSeconds.toFixed(2)),
+      nominalSegmentCoverageSeconds: Number(nominalCoverage.toFixed(2)),
+      linesDroppedEntirely
+    });
+    ytLog('info', '[Q5] Final filtered content (truncated for console):', ytSnippet(finalContent));
+    ytLog('info', '[Q5] Full JSON payload (truncated for console):', ytSnippet(finalPayload));
+
+    return finalPayload;
   }
 
   /* 
