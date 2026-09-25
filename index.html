@@ -886,7 +886,6 @@
   }
 
   .speak-btn.busy {
-    pointer-events: none;
     animation: tts-busy-blink 0.8s infinite;
   }
 
@@ -1653,17 +1652,17 @@
     let toolLine = `No tools are available this turn.`;
     if (tavilyEnabled) {
       toolLine = `Tools get_youtube_transcript, web_search and fetch_web_page are available.\n` +
-        `Use get_youtube_transcript for YouTube videos. NEVER use web_search or fetch_web_page for YouTube.\n` +
-        `Your summaries of YouTube videos should be free of introductions like 'This video is...' ` +
-        `or boilerplate like the channel's name or the number of views. Start right away with the meat of it.\n` +
-        `The summaries must be written in plain prose that is well-suited to be read aloud by a TTS engine, ` +
-        `rather than a collection of bullet points. Do not include sponsored content, self-promotions, and the like.\n` +
-        `Include timestamps with links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n` +
+        `Follow each tool's description for its usage rules.\n` +
         `You may perform up to ${maxCalls} tool call${maxCalls === 1 ? '' : 's'} in total this turn.`;
     }
     return `# System Baseline Configuration\n` +
            `Date: ${dateStr}\n` +
            `Time: ${timeStr}\n\n` +
+           `When summarizing a video, start right away with the substance, without ` +
+           `introductions or boilerplate like the channel name, the view count, or 'In this video...'.\n` +
+           `Write plain prose suited to be read aloud by a TTS engine, rather than bullet points. ` +
+           `Omit advertisements, sponsored content and self-promotions. ` +
+           `Include timestamps as links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n\n` +
            `# Available Tools\n` +
            `${toolLine}\n\n` +
            `# User's Instructions\n`;
@@ -1671,74 +1670,32 @@
   
   /*
    * ==========================================================================
-   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed) — WORD-LEVEL FILTERING
-   * YouTube does not serve Access-Control-Allow-Origin on its pages or its
-   * InnerTube/caption endpoints, so no browser fetch() can ever read the
-   * response body (CORS), regardless of CSP. All YouTube egress therefore
-   * goes through Tavily's server-side extractor. NOTE: this returns the
-   * extracted page content for the watch URL, not a guaranteed verbatim
-   * caption track -- what Tavily's crawler can retrieve is what we get.
+   * YOUTUBE TRANSCRIPT EXTRACTOR TOOL (Tavily-backed) — LINE-LEVEL FILTERING
+   * YouTube does not serve CORS headers on its pages or caption endpoints, so
+   * all YouTube egress goes through Tavily's server-side extractor, which
+   * returns the page content (not a guaranteed verbatim caption track).
    *
-   * This build replaces line-based SponsorBlock filtering with WORD-level
-   * filtering based on interpolated word timings:
-   *   - Each caption line's spoken span is estimated from its timestamp,
-   *     the next line's timestamp, the word count, and a global words/second
-   *     rate estimated from the caption track itself (median of per-line
-   *     rates, so silences do not skew it).
-   *   - Words are allocated equal slices of the line's estimated span, so
-   *     we get sub-second estimates of when each word is spoken.
-   *   - A word is removed when its estimated midpoint falls inside any
-   *     SponsorBlock segment; lines left empty are dropped entirely.
-   *   - SponsorBlock segments are coalesced the way playback experiences
-   *     them: the server already filters submissions by vote/view
-   *     thresholds, so all returned segments are kept, deduplicated by
-   *     UUID, and merged into union intervals when they overlap or nearly
-   *     touch. Weighted votes are logged for inspection.
-   *   - The metadata preamble (title/description) is left untouched; only
-   *     the "### Transcript" section is filtered.
-   *   - "sponsorblock_seconds_removed" reports the ACTUAL estimated seconds
-   *     of speech removed, derived from the removed words' spans.
+   * Sponsor segments are removed at CAPTION-LINE granularity: a line is
+   * dropped when coalesced SponsorBlock intervals cover more than half of
+   * its estimated span (the interval from its own timestamp to the next
+   * line's timestamp; the last line assumes a 5-second span). Runs of
+   * consecutive dropped lines collapse into a single "[...]" marker, so the
+   * model both knows that content is missing and can see the timestamps
+   * jumping across the gap. No word-timing interpolation: the consumer is
+   * an LLM that will summarize the whole thing regardless, and half a line
+   * of stray sponsor speech at a boundary costs it nothing.
+   *
+   * Parsing is STRICT by design: the transcript must contain a
+   * "### Transcript" heading, every non-blank line under it must match the
+   * "[M:SS] caption" grammar, and timestamps must never move backwards.
+   * Any violation throws, so format drift is a loud tool error rather than
+   * a silently mangled transcript.
    * ==========================================================================
    */
-  const YT_TOOL_DEBUG = false;            // master switch for all logging
-  const YT_LOG_MAX_TEXT = 4000;          // max characters dumped per log entry
-  // Word-timing estimation parameters
-  const YT_DEFAULT_WORD_RATE = 2.6;      // words/sec fallback (typical English speech)
-  const YT_RATE_CLAMP_MIN = 1.2;         // sanity bounds on the estimated rate
-  const YT_RATE_CLAMP_MAX = 8.0;
-  const YT_MIN_LINE_DURATION = 0.25;     // s; a line never spans less than this
-  const YT_SEGMENT_MERGE_GAP = 0.5;      // s; segments closer than this are merged
-  const YT_MIN_WEIGHTED_VOTES = 0;       // server already thresholds; raise to be stricter
-  const YT_LOCKED_VOTE_BONUS = 500;      // mirrors the official extension's locked-segment bonus
-  const YT_MIN_KEPT_WORDS = 2;           // lines kept with fewer words than this are
-  const YT_MIN_KEPT_FRACTION = 0.2;      // dropped as orphan fragments (or fewer than
-                                         // 20% of original words kept)
+  const YT_SEGMENT_MERGE_GAP = 0.5;  /* s; segments closer than this are merged */
+  const YT_LAST_LINE_SPAN = 5;       /* s; assumed span of the final caption line */
 
-  /**
-   * Central logger. Timestamped (ISO 8601) so call ordering and parallelism
-   * can be verified by comparing the millisecond fields in the console.
-   */
-  function ytLog(level, message, data = undefined) {
-    if (!YT_TOOL_DEBUG) return;
-    const prefix = `[YT-TOOL][${new Date().toISOString()}]`;
-    if (data !== undefined) {
-      console[level === 'warn' ? 'warn' : level === 'error' ? 'error' : 'log'](prefix, message, data);
-    } else {
-      console[level === 'warn' ? 'warn' : level === 'error' ? 'error' : 'log'](prefix, message);
-    }
-  }
-
-  /** Truncate long strings for console readability without losing evidence. */
-  function ytSnippet(text, max = YT_LOG_MAX_TEXT) {
-    if (typeof text !== 'string') {
-      try { text = JSON.stringify(text); } catch { text = String(text); }
-    }
-    return text.length <= max ? text : text.slice(0, max) + `… [+${text.length - max} chars truncated]`;
-  }
-
-  /**
-   * Converts a timestamp string (HH:MM:SS, MM:SS, or S) into total seconds.
-   */
+  /* Converts "HH:MM:SS" / "MM:SS" / "S" to total seconds; null if malformed. */
   function parseTimestampToSeconds(timestampStr) {
     if (!timestampStr) return null;
     const parts = timestampStr.split(':').map(Number);
@@ -1749,7 +1706,7 @@
     return null;
   }
 
-  /** Formats seconds back to the [M:SS] / [H:MM:SS] caption style. */
+  /* Formats seconds back to the [M:SS] / [H:MM:SS] caption style. */
   function formatSecondsAsTimestamp(totalSeconds) {
     const s = Math.max(0, Math.floor(totalSeconds));
     const h = Math.floor(s / 3600);
@@ -1759,644 +1716,172 @@
     return `${m}:${String(ss).padStart(2, '0')}`;
   }
 
-  /**
-   * Scans text for timestamp-like tokens and reports their granularity.
-   */
-  function analyzeTimestampGranularity(content, label = 'content') {
-    const matches = content.match(/\d{1,2}:\d{2}(?::\d{2})?/g) || [];
-    const sample = matches.slice(0, 20);
-    const withHours = matches.filter(m => /^\d{1,2}:\d{2}:\d{2}$/.test(m)).length;
-    ytLog('info', `[Q1] Timestamp granularity of ${label}:`, {
-      scope: label,
-      totalTimestampTokensFound: matches.length,
-      tokensWithHours: withHours,
-      tokensMinutesSecondsOnly: matches.length - withHours,
-      firstTokensSample: sample,
-      monotonic: sample.every((m, i, arr) =>
-        i === 0 || (parseTimestampToSeconds(m) ?? 0) >= (parseTimestampToSeconds(arr[i - 1]) ?? 0))
-    });
-  }
-
-  /**
-   * Splits the extracted content at the "### Transcript" heading into a
-   * preamble (title/description metadata, left untouched) and the transcript
-   * body. The heading is part of the expected Tavily format; if it is
-   * missing, we fail loudly rather than guess at the structure.
-   */
+  /* Splits the extracted content at the "### Transcript" heading into a
+   * preamble (title/description, left untouched) and the transcript body.
+   * A missing heading is a contract violation and throws. */
   function splitContentAtTranscriptHeading(content) {
     const marker = '### Transcript';
     const idx = content.indexOf(marker);
     if (idx === -1) {
-      throw new Error(
-        `Tavily extract does not contain a "${marker}" heading -- ` +
-        'unexpected format, cannot isolate the transcript.'
-      );
+      throw new Error(`Tavily extract does not contain a "${marker}" heading -- ` +
+        'unexpected format, cannot isolate the transcript.');
     }
     const preamble = content.slice(0, idx).trimEnd();
     const transcript = content.slice(idx + marker.length).replace(/^\s*\n/, '');
-    ytLog('info', '[Q4] Content split at transcript heading.', {
-      preambleLength: preamble.length,
-      transcriptLength: transcript.length
-    });
     return { preamble, transcript };
   }
 
-  // The caption-line grammar Tavily emits: a bracketed timestamp (with or
-  // without an hours component) at the very start of the line, followed by
-  // a space and the caption text. Anything else in the transcript section
-  // is a contract violation and fails loudly.
+  /* The caption-line grammar Tavily emits: a bracketed timestamp at the
+   * very start of the line, a space, then the caption text. STRICT: any
+   * non-blank line that does not match throws, as does a timestamp that
+   * moves backwards. No fallbacks; deal with format drift if it happens. */
   const YT_CAPTION_LINE_RE = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\] (.*)$/;
 
-  /**
-   * Parses the transcript body into entries: { time, words[] }, exploiting
-   * the KNOWN structure Tavily provides: after the "### Transcript" heading,
-   * every caption line starts with a bracketed "[M:SS]" (or "[H:MM:SS]")
-   * timestamp. There is NO fallback: any non-blank line that does not match
-   * this grammar, or any timestamp that moves backwards, throws. We will
-   * deal with format drift if and when it happens.
-   */
   function parseTranscriptEntries(transcript) {
     const lines = transcript.split('\n');
     const entries = [];
-
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (!line.trim()) continue;  // blank lines are fine
+      if (!line.trim()) continue;
       const m = line.match(YT_CAPTION_LINE_RE);
       if (!m) {
-        throw new Error(
-          `Transcript line ${i + 1} does not match the expected "[M:SS] caption" ` +
-          `format: ${JSON.stringify(line.slice(0, 120))}`
-        );
+        throw new Error(`Transcript line ${i + 1} does not match the expected "[M:SS] caption" ` +
+          `format: ${JSON.stringify(line.slice(0, 120))}`);
       }
       const time = parseTimestampToSeconds(m[1]);
       if (time === null) {
-        throw new Error(
-          `Transcript line ${i + 1} has an unparseable timestamp: ${JSON.stringify(line.slice(0, 120))}`
-        );
+        throw new Error(`Transcript line ${i + 1} has an unparseable timestamp: ` +
+          JSON.stringify(line.slice(0, 120)));
       }
       const prev = entries[entries.length - 1];
       if (prev && time < prev.time) {
-        throw new Error(
-          `Transcript line ${i + 1} timestamp moved backwards ` +
-          `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)}): ` +
-          `${JSON.stringify(line.slice(0, 120))}`
-        );
+        throw new Error(`Transcript line ${i + 1} timestamp moved backwards ` +
+          `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)})` +
+          `${JSON.stringify(line.slice(0, 120))}`);
       }
-      entries.push({ time, rawText: m[2] });
+      entries.push({ time, text: m[2] });
     }
-
     if (entries.length === 0) {
       throw new Error('Transcript section contained no caption lines.');
     }
-
-    ytLog('info', '[Q4] Transcript parsed using known structure.', {
-      captionEntries: entries.length,
-      firstEntryTime: formatSecondsAsTimestamp(entries[0].time),
-      lastEntryTime: formatSecondsAsTimestamp(entries[entries.length - 1].time)
-    });
-
-    return entries.map(e => ({
-      time: e.time,
-      words: e.rawText.trim().split(/\s+/).filter(Boolean)
-    }));
+    return entries;
   }
 
-  /**
-   * Estimates the speaker's words/second rate from the caption track:
-   * for each line, rate = wordCount / (nextLineTimestamp - lineTimestamp).
-   * The MEDIAN of these per-interval rates is used so pauses/silences
-   * (which inflate a line's gap) do not drag the estimate down the way a
-   * naive mean over the whole video would. Clamped to a plausible range.
-   */
-  function estimateWordRate(entries) {
-    const rates = [];
-    for (let i = 0; i < entries.length - 1; i++) {
-      const gap = entries[i + 1].time - entries[i].time;
-      if (gap > 0 && entries[i].words.length > 0) {
-        const r = entries[i].words.length / gap;
-        if (r >= 0.5 && r <= 10) rates.push(r);
-      }
-    }
-    let rate = YT_DEFAULT_WORD_RATE;
-    let method = 'fallback default';
-    if (rates.length > 0) {
-      rates.sort((a, b) => a - b);
-      rate = rates[Math.floor(rates.length / 2)];
-      method = `median of ${rates.length} per-line rates`;
-    }
-    rate = Math.min(YT_RATE_CLAMP_MAX, Math.max(YT_RATE_CLAMP_MIN, rate));
-    ytLog('info', '[Q4] Speaking rate estimated.', {
-      method,
-      estimatedWordsPerSecond: Number(rate.toFixed(3)),
-      perLineRatesSample: rates.slice(0, 10).map(r => Number(r.toFixed(2)))
-    });
-    return rate;
-  }
-
-  /**
-   * Builds a word-level timeline. For each caption line:
-   *   naturalEnd = lineTime + wordCount / rate          (how long speech takes)
-   *   lineEnd    = min(naturalEnd, nextLineTimestamp)   (next speech starts then;
-   *                                                       trailing silence respected)
-   * For the last line, videoDuration (from SponsorBlock) bounds it.
-   * Each word then receives an equal slice [start, end] of the line's span,
-   * yielding sub-second estimates of when every word is spoken.
-   */
-  function buildWordTimeline(entries, rate, videoDuration) {
-    const timeline = entries.map((e, i) => {
-      const naturalEnd = e.time + (e.words.length / rate);
-      const nextTime = (i + 1 < entries.length) ? entries[i + 1].time : null;
-      let end;
-      if (nextTime !== null) {
-        end = Math.min(naturalEnd, nextTime);
-      } else if (typeof videoDuration === 'number' && videoDuration > e.time) {
-        end = Math.min(naturalEnd, videoDuration);
-      } else {
-        end = naturalEnd;
-      }
-      end = Math.max(end, e.time + YT_MIN_LINE_DURATION);
-      const wordSpan = (end - e.time) / Math.max(1, e.words.length);
-      const words = e.words.map((w, k) => ({
-        word: w,
-        start: e.time + k * wordSpan,
-        end: e.time + (k + 1) * wordSpan
-      }));
-      return { time: e.time, end, words };
-    });
-    ytLog('info', '[Q4] Word timeline built.', {
-      lines: timeline.length,
-      sampleFirst12Lines: timeline.slice(0, 12).map((l, idx) => ({
-        line: idx + 1,
-        time: formatSecondsAsTimestamp(l.time),
-        estimatedEnd: Number(l.end.toFixed(2)),
-        words: l.words.length
-      }))
-    });
-    return timeline;
-  }
-
-  /**
-   * Coalesces SponsorBlock submissions into one set of skip intervals, the
-   * way the official system experiences them in playback: the server has
-   * already filtered submissions by its vote/view thresholds (we do not
-   * see rejected ones), so we keep everything returned, deduplicate by
-   * UUID, and merge overlapping / near-adjacent intervals into union
-   * intervals. Weighted votes (votes + locked bonus, mirroring the
-   * extension's convention) are computed for inspection and an optional
-   * operator threshold.
-   */
-  function coalesceSponsorBlockSegments(rawItems) {
-    const byUuid = new Map();
-    for (const item of rawItems) {
-      if (item.uuid && !byUuid.has(item.uuid)) byUuid.set(item.uuid, item);
-    }
-    const unique = [...byUuid.values()];
-    const scored = unique.map(item => ({
-      category: item.category,
-      start: item.start,
-      end: item.end,
-      uuid: item.uuid,
-      votes: item.votes,
-      locked: item.locked,
-      weightedVotes: (item.votes || 0) + (item.locked ? YT_LOCKED_VOTE_BONUS : 0)
-    }));
-    const kept = scored.filter(s => s.weightedVotes >= YT_MIN_WEIGHTED_VOTES);
-    const dropped = scored.filter(s => s.weightedVotes < YT_MIN_WEIGHTED_VOTES);
-    if (dropped.length > 0) {
-      ytLog('warn', `[Q2b] ${dropped.length} segment(s) below YT_MIN_WEIGHTED_VOTES discarded:`, dropped);
-    }
-    const sorted = [...kept].sort((a, b) => a.start - b.start);
-    const merged = [];
-    for (const seg of sorted) {
-      const last = merged[merged.length - 1];
-      if (last && seg.start <= last.end + YT_SEGMENT_MERGE_GAP) {
-        last.end = Math.max(last.end, seg.end);
-        last.categories.add(seg.category);
-        last.uuids.push(seg.uuid);
-        last.weightedVotes += seg.weightedVotes;
-      } else {
-        merged.push({
-          start: seg.start,
-          end: seg.end,
-          categories: new Set([seg.category]),
-          uuids: [seg.uuid],
-          weightedVotes: seg.weightedVotes
-        });
-      }
-    }
-    const result = merged.map(m => ({
-      start: m.start,
-      end: m.end,
-      categories: [...m.categories],
-      contributingSegments: m.uuids.length,
-      weightedVotes: m.weightedVotes
-    }));
-    ytLog('info', `[Q2b] Segment coalescing complete: ${unique.length} unique submission(s) -> ${result.length} merged interval(s).`, {
-      rawSubmissions: scored,
-      mergedIntervals: result
-    });
-    return result;
-  }
-
-  /**
-   * Fetches skip segments from the SponsorBlock API for a given video ID.
-   * This call goes DIRECTLY to sponsor.ajay.app (which serves CORS
-   * headers) -- only YouTube egress needs Tavily. Returns:
-   *   { segments: coalesced intervals, videoDuration, rawSegmentCount }
-   * or { segments: [], videoDuration: null, rawSegmentCount: 0 } on
-   * 404/error.
-   */
+  /* Fetches skip segments from SponsorBlock (serves CORS headers, so this
+   * goes direct; only YouTube egress needs Tavily). The server has already
+   * filtered submissions by its vote/view thresholds, so everything
+   * returned is kept: segments are deduplicated by UUID and merged into
+   * union intervals when they overlap or nearly touch -- the way playback
+   * experiences them. Categories are part of the request (unchanged by
+   * design decision) but carry no per-category weight here. Any failure
+   * -- network, HTTP, malformed JSON -- degrades to "no segments", which
+   * means the transcript is returned unfiltered rather than the tool
+   * failing on a free side-service. Abort is rethrown so the stop button
+   * tears down the whole turn. */
   async function fetchSponsorBlockSegments(videoId, signal = null) {
     const categories = JSON.stringify([
-      'sponsor',          // Paid promotions
-      'selfpromo',        // Self-promotion (merch, etc)
-      'exclusive_access', // Segments promoting member-exclusive bonus material
-      'interaction',      // "Please like & subscribe!"
-      'intro',            // Trite opening title sequences
-      'preview',          // Teasers and hooks at the beginning of the video
-      'outro',            // Closing credits, Patreon lists, sign-offs
-      'filler'            // Tangential rants and gags
+      'sponsor', 'selfpromo', 'exclusive_access', 'interaction',
+      'intro', 'preview', 'outro', 'filler'
     ]);
     const url = `https://sponsor.ajay.app/api/skipSegments?videoID=${encodeURIComponent(videoId)}&categories=${encodeURIComponent(categories)}`;
-
-    ytLog('info', '[Q2] SponsorBlock request starting.', {
-      url,
-      videoId,
-      categoriesRequested: JSON.parse(categories),
-      startedAtMs: performance.now()
-    });
-
     try {
       const res = await fetch(url, { method: 'GET', signal });
-
-      ytLog(res.ok ? 'info' : 'warn', `[Q2] SponsorBlock HTTP ${res.status} ${res.statusText}.`, {
-        ok: res.ok,
-        contentType: res.headers.get('content-type'),
-        finishedAtMs: performance.now()
-      });
-
-      if (res.status === 404) {
-        ytLog('info', '[Q2] SponsorBlock: 404 — no segments exist for this video. Returning [].');
-        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
-      }
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => '<body unreadable>');
-        ytLog('error', `[Q2] SponsorBlock: unexpected HTTP ${res.status}. Raw body:`, ytSnippet(bodyText, 1000));
-        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
-      }
-
-      const rawBody = await res.text();
-      ytLog('info', '[Q2] SponsorBlock raw response body:', ytSnippet(rawBody));
-
-      let data;
-      try {
-        data = JSON.parse(rawBody);
-      } catch (e) {
-        ytLog('error', '[Q2] SponsorBlock: response is not valid JSON.', { error: String(e) });
-        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
-      }
-
-      if (!Array.isArray(data)) {
-        ytLog('error', '[Q2] SponsorBlock: expected a JSON array but got a different shape.', {
-          actualType: typeof data,
-          keys: data && typeof data === 'object' ? Object.keys(data) : null
-        });
-        return { segments: [], videoDuration: null, rawSegmentCount: 0 };
-      }
-
-      const validItems = [];
-      let malformed = 0;
-      let videoDuration = null;
-      for (const item of data) {
-        const seg = item && item.segment;
-        const start = seg && seg[0], end = seg && seg[1];
-        if (typeof start === 'number' && typeof end === 'number' && end >= start && start >= 0) {
-          validItems.push({
-            category: item.category,
-            start,
-            end,
-            uuid: item.UUID,
-            votes: item.votes,
-            locked: item.locked,
-            videoDuration: item.videoDuration
-          });
-          if (typeof item.videoDuration === 'number') videoDuration = item.videoDuration;
+      if (!res.ok) return []; /* 404 = no segments; other errors degrade too */
+      const data = await res.json();
+      if (!Array.isArray(data)) return [];
+      const valid = data
+        .filter(item => item && item.segment &&
+          typeof item.segment[0] === 'number' && typeof item.segment[1] === 'number' &&
+          item.segment[1] >= item.segment[0] && item.segment[0] >= 0)
+        .map(item => ({ start: item.segment[0], end: item.segment[1], uuid: item.UUID }));
+      const byUuid = new Map();
+      for (const seg of valid) if (seg.uuid && !byUuid.has(seg.uuid)) byUuid.set(seg.uuid, seg);
+      const sorted = [...byUuid.values()].sort((a, b) => a.start - b.start);
+      const merged = [];
+      for (const seg of sorted) {
+        const last = merged[merged.length - 1];
+        if (last && seg.start <= last.end + YT_SEGMENT_MERGE_GAP) {
+          last.end = Math.max(last.end, seg.end);
         } else {
-          malformed++;
-          ytLog('warn', '[Q2] SponsorBlock: discarding malformed segment entry:', item);
+          merged.push({ start: seg.start, end: seg.end });
         }
       }
-
-      ytLog('info', `[Q2] SponsorBlock: ${validItems.length} valid submission(s), ${malformed} malformed.`, {
-        validItems,
-        videoDuration
-      });
-
-      const segments = coalesceSponsorBlockSegments(validItems);
-      return { segments, videoDuration, rawSegmentCount: validItems.length };
+      return merged;
     } catch (e) {
-      if (e && (e.name === 'AbortError' || (signal && signal.aborted))) {
-        ytLog('warn', '[Q2] SponsorBlock fetch aborted by caller.');
-      } else {
-        ytLog('error', '[Q2] SponsorBlock fetch failed with a network-level error:', e);
-      }
-      return { segments: [], videoDuration: null, rawSegmentCount: 0 };
+      if (e && (e.name === 'AbortError' || (signal && signal.aborted))) throw e;
+      return [];
     }
   }
 
-  /**
-   * Removes, per word, every word whose estimated spoken midpoint falls
-   * inside a coalesced SponsorBlock segment. Lines left empty -- or left
-   * as trivial orphan fragments (e.g. a lone "Hey," where a segment began
-   * mid-line) -- are dropped entirely. Returns the rebuilt transcript text
-   * plus stats.
-   */
-  function filterWordsBySegments(timeline, segments) {
-    const removalLog = [];
-    const droppedFragmentLog = [];
-    let removedWordsTotal = 0;
-    let removedSeconds = 0;
-    let linesDroppedEntirely = 0;
-    let linesDroppedAsFragments = 0;
-
-    const rebuiltLines = [];
-    for (let i = 0; i < timeline.length; i++) {
-      const line = timeline[i];
-      const keptWords = [];
-      for (const w of line.words) {
-        const mid = (w.start + w.end) / 2;
-        const hit = segments.find(seg => mid >= seg.start && mid <= seg.end);
-        if (hit) {
-          removedWordsTotal++;
-          removedSeconds += (w.end - w.start);
-          if (removalLog.length < 60) {
-            removalLog.push({
-              line: i + 1,
-              lineTime: formatSecondsAsTimestamp(line.time),
-              word: w.word,
-              wordMidpointSeconds: Number(mid.toFixed(2)),
-              matchedCategories: hit.categories
-            });
-          }
-        } else {
-          keptWords.push(w.word);
-        }
+  /* Line-level filter: drops each caption line whose estimated span is more
+   * than half covered by coalesced segments; consecutive drops collapse into
+   * one "[...]" marker. */
+  function filterTranscriptLines(entries, segments) {
+    const kept = [];
+    let inGap = false;
+    for (let i = 0; i < entries.length; i++) {
+      const start = entries[i].time;
+      const end = (i + 1 < entries.length) ? entries[i + 1].time : start + YT_LAST_LINE_SPAN;
+      const span = Math.max(end - start, 0.001);
+      let covered = 0;
+      for (const seg of segments) {
+        covered += Math.max(0, Math.min(seg.end, end) - Math.max(seg.start, start));
       }
-      if (line.words.length === 0) continue;
-      if (keptWords.length === 0) {
-        // Whole line inside the segments.
-        linesDroppedEntirely++;
-        continue;
-      }
-      const keptFraction = keptWords.length / line.words.length;
-      if (keptWords.length <= YT_MIN_KEPT_WORDS || keptFraction < YT_MIN_KEPT_FRACTION) {
-        // Orphan fragment: a segment began mid-line and left a token stub
-        // (e.g. "[4:00] Hey,"). The kept words count as removed speech too.
-        linesDroppedAsFragments++;
-        removedWordsTotal += keptWords.length;
-        removedSeconds += keptWords.length * ((line.end - line.time) / Math.max(1, line.words.length));
-        if (droppedFragmentLog.length < 20) {
-          droppedFragmentLog.push({
-            line: i + 1,
-            lineTime: formatSecondsAsTimestamp(line.time),
-            originalWordCount: line.words.length,
-            keptStub: keptWords.join(' '),
-            keptFraction: Number(keptFraction.toFixed(2))
-          });
-        }
-        continue;
-      }
-      rebuiltLines.push(`[${formatSecondsAsTimestamp(line.time)}] ${keptWords.join(' ')}`);
+      if (covered > span / 2) { inGap = true; continue; }
+      if (inGap) { kept.push('[...]'); inGap = false; }
+      kept.push(`[${formatSecondsAsTimestamp(start)}] ${entries[i].text}`);
     }
-    // Audit log: lines that were PARTIALLY cut (some words kept, some
-    // removed) -- these are the mid-video excisions worth eyeballing.
-    const partialLines = [];
-    for (let i = 0; i < timeline.length; i++) {
-      const line = timeline[i];
-      const removedInLine = line.words.filter(w => {
-        const mid = (w.start + w.end) / 2;
-        return segments.some(seg => mid >= seg.start && mid <= seg.end);
-      }).length;
-      if (removedInLine > 0 && removedInLine < line.words.length) {
-        partialLines.push({
-          line: i + 1,
-          lineTime: formatSecondsAsTimestamp(line.time),
-          originalWordCount: line.words.length,
-          wordsRemoved: removedInLine,
-          rebuiltLine: rebuiltLines.find(l => l.startsWith(`[${formatSecondsAsTimestamp(line.time)}]`)) || '(dropped as fragment)'
-        });
-      }
-    }
-    ytLog('info', `[Q4] Partially-cut lines (mid-video excisions): ${partialLines.length} found.`, partialLines);
-
-    ytLog('info', '[Q4] Word-level filtering complete.', {
-      captionLines: timeline.length,
-      wordsRemoved: removedWordsTotal,
-      estimatedSecondsOfSpeechRemoved: Number(removedSeconds.toFixed(2)),
-      linesDroppedEntirely,
-      linesDroppedAsFragments,
-      linesKept: rebuiltLines.length
-    });
-    ytLog('info', '[Q4] Removed words (up to 60, with estimated midpoints):', removalLog);
-    if (linesDroppedAsFragments > 0) {
-      ytLog('info', '[Q4] Orphan fragment lines dropped (stub kept by the midpoint rule):', droppedFragmentLog);
-    }
-
-    return {
-      filteredTranscript: rebuiltLines.join('\n'),
-      removedWordsTotal,
-      removedSeconds,
-      linesDroppedEntirely,
-      linesDroppedAsFragments
-    };
+    if (inGap) kept.push('[...]');
+    return kept.join('\n');
   }
 
-  /* Strict extractor: recognized shapes are a bare 11-char video ID or any
-   * of the standard watch/embed/short/share URL forms. Anything else is NOT
-   * a YouTube target and returns null -- the caller reports a proper tool
-   * error instead of best-effort fetching a garbage watch URL. */
+  /* Strict extractor: a bare 11-char video ID or any standard watch/embed/
+   * shorts/share URL form; anything else returns null so the caller reports
+   * a proper tool error. */
   function extractYouTubeVideoId(input) {
     if (!input) return null;
     const cleaned = input.trim();
     if (/^[a-zA-Z0-9_-]{11}$/.test(cleaned)) return cleaned;
     const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-    const videoId = match ? match[1] : null;
-    ytLog(videoId ? 'info' : 'warn', `[Q0] Video ID extraction: "${cleaned}" -> ${JSON.stringify(videoId)}`);
-    return videoId;
+    return match ? match[1] : null;
   }
 
-  /**
-   * Tavily extract wrapper with full request/response logging. Handles both
-   * a bare array (legacy/unwrapped shape) and the standard object shape
-   * { results, failed_results, response_time, request_id }.
-   */
-  async function executeTavilyExtractWithLogging(watchUrl, signal) {
-    const t0 = performance.now();
-    ytLog('info', '[Q1] Tavily extract request starting.', {
-      endpoint: 'extract',
-      urls: [watchUrl],
-      startedAtMs: t0
-    });
-
-    const rawResponse = await executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal);
-    const elapsed = Math.round(performance.now() - t0);
-
-    ytLog('info', `[Q1] Tavily returned in ${elapsed} ms. Raw value type: ${Array.isArray(rawResponse) ? 'Array' : typeof rawResponse}`);
-    ytLog('info', '[Q1] Raw Tavily response (as received by this code):', ytSnippet(rawResponse));
-
-    let results;
-    if (Array.isArray(rawResponse)) {
-      ytLog('info', '[Q1] Tavily response is a bare ARRAY (legacy/unwrapped shape).');
-      results = rawResponse;
-    } else if (rawResponse && typeof rawResponse === 'object') {
-      const obj = rawResponse;
-      if (Object.prototype.hasOwnProperty.call(obj, 'results') || Object.prototype.hasOwnProperty.call(obj, 'failed_results')) {
-        ytLog('info', '[Q1] Tavily response is the standard OBJECT shape.', {
-          resultsCount: Array.isArray(obj.results) ? obj.results.length : null,
-          failedResults: Array.isArray(obj.failed_results) ? obj.failed_results : null,
-          responseTime: obj.response_time,
-          requestId: obj.request_id
-        });
-        if (Array.isArray(obj.failed_results) && obj.failed_results.length > 0) {
-          ytLog('warn', '[Q1] Tavily reported failed URLs — an HTTP 200 can still carry failures:', obj.failed_results);
-        }
-        results = Array.isArray(obj.results) ? obj.results : [];
-      } else {
-        ytLog('warn', '[Q1] Tavily response is an object but has neither "results" nor "failed_results".', {
-          keys: Object.keys(obj)
-        });
-        results = [obj];
-      }
-    } else {
-      ytLog('error', '[Q1] Tavily response is neither an array nor an object.', { value: rawResponse });
-      results = [];
-    }
-
-    for (const r of results) {
-      const contentField = typeof r === 'string' ? '(bare string)' : (r.raw_content !== undefined ? 'raw_content' : r.content !== undefined ? 'content' : '(none)');
-      ytLog('info', '[Q1] Individual Tavily result:', {
-        url: r && r.url,
-        urlMatchesRequestedWatchUrl: r && r.url === watchUrl,
-        contentFieldUsed: contentField,
-        contentLength: typeof r === 'string' ? r.length : ((r.raw_content || r.content || '')).length,
-        hasImages: !!(r && r.images && r.images.length)
-      });
-    }
-
-    return results;
-  }
-
-  /* Fetch the transcript of a Youtube video, removing all the segments flagged by SponsorBlock */
+  /* Fetch the transcript of a YouTube video with SponsorBlock-flagged
+   * segments removed. Tavily extract and SponsorBlock run concurrently.
+   * The payload is deliberately minimal: the model consumes `content`; the
+   * identity fields exist only so it can cite the source. */
   async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
-    const overallT0 = performance.now();
     const videoId = extractYouTubeVideoId(videoInput);
     if (!videoId) throw new Error("Invalid YouTube Video ID or URL");
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
-
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    ytLog('info', '[Q0] fetchYouTubeTranscript starting.', { videoInput, videoId, preferredLang, watchUrl });
 
-    const tavilyStart = performance.now();
-    ytLog('info', '[Q3] Launching Tavily + SponsorBlock concurrently via Promise.all.', {
-      tavilyStartMs: tavilyStart
-    });
-
-    const [extractResults, sbResult] = await Promise.all([
-      executeTavilyExtractWithLogging(watchUrl, signal),
+    const [rawResults, segments] = await Promise.all([
+      executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal),
       fetchSponsorBlockSegments(videoId, signal)
     ]);
-    const { segments: mergedSegments, videoDuration, rawSegmentCount } = sbResult;
 
-    ytLog('info', '[Q3] Both calls resolved.', {
-      tavilyStartMs: tavilyStart,
-      sponsorblockStartMs: '(see [Q2] "startedAtMs" in the first SponsorBlock log above; ' +
-        'identical value = same-millisecond launch = parallel)',
-      totalElapsedMs: Math.round(performance.now() - tavilyStart)
-    });
-
-    if (!Array.isArray(extractResults) || extractResults.length === 0) {
-      ytLog('error', '[Q1] No content returned for the video page. Throwing.', { extractResults });
-      throw new Error("No content returned for the video page.");
-    }
-
-    const rawContent = extractResults
+    const rawContent = rawResults
       .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
       .filter(Boolean)
       .join('\n\n');
-
-    ytLog('info', '[Q1] Raw Tavily content after joining result parts:', {
-      length: rawContent.length,
-      previewFirst1000Chars: ytSnippet(rawContent, 1000),
-      previewLast500Chars: rawContent.slice(-500)
-    });
-
     if (!rawContent) throw new Error("Video page was fetched but contained no extractable content.");
 
-    // Keep the metadata preamble untouched; word-filter only the transcript.
     const { preamble, transcript } = splitContentAtTranscriptHeading(rawContent);
-    analyzeTimestampGranularity(preamble, 'preamble (description section)');
-    analyzeTimestampGranularity(transcript, 'transcript section');
-
-    let finalContent = rawContent;       // fallback: pass-through
-    let removedWordsTotal = 0;
-    let removedSeconds = 0;
-    let linesDroppedEntirely = 0;
-
     const entries = parseTranscriptEntries(transcript);
-    if (entries.length === 0) {
-      ytLog('warn', '[Q4] No timestamped caption entries found in the transcript section. ' +
-        'Word-level filtering is impossible; returning content unfiltered.');
-    } else if (mergedSegments.length === 0) {
-      ytLog('info', '[Q4] Zero SponsorBlock segments after coalescing. Returning content unfiltered.');
-    } else {
-      const rate = estimateWordRate(entries);
-      const timeline = buildWordTimeline(entries, rate, videoDuration);
-      const filtered = filterWordsBySegments(timeline, mergedSegments);
-      removedWordsTotal = filtered.removedWordsTotal;
-      removedSeconds = filtered.removedSeconds;
-      linesDroppedEntirely = filtered.linesDroppedEntirely;
-      const linesDroppedAsFragments = filtered.linesDroppedAsFragments;
-      // The "### Transcript" heading is guaranteed present (its absence
-      // throws in splitContentAtTranscriptHeading), so re-attach it
-      // unconditionally between the untouched preamble and the filtered
-      // transcript.
-      const parts = [];
-      if (preamble) parts.push(preamble);
-      parts.push('### Transcript\n' + filtered.filteredTranscript);
-      finalContent = parts.join('\n\n');
-    }
+    const body = segments.length ? filterTranscriptLines(entries, segments) : null;
+    const finalTranscript = body ?? entries.map(e => `[${formatSecondsAsTimestamp(e.time)}] ${e.text}`).join('\n');
 
-    const nominalCoverage = mergedSegments.reduce((a, s) => a + (s.end - s.start), 0);
-    const finalPayload = JSON.stringify({
+    const parts = [];
+    if (preamble) parts.push(preamble);
+    parts.push('### Transcript\n' + finalTranscript);
+    return JSON.stringify({
       video_id: videoId,
       language: preferredLang,
       source: 'tavily_extract',
       page_url: watchUrl,
-      sponsorblock_segments_found: rawSegmentCount,
-      sponsorblock_segments_after_coalescing: mergedSegments.length,
-      sponsorblock_seconds_removed: Math.round(removedSeconds),
-      sponsorblock_segment_coverage_seconds: Math.round(nominalCoverage),
-      sponsorblock_words_removed: removedWordsTotal,
-      sponsorblock_lines_dropped: linesDroppedEntirely,
-      content: finalContent
+      content: parts.join('\n\n')
     });
-
-    ytLog('info', '[Q5] FINAL payload returned to tool caller.', {
-      totalWallClockMs: Math.round(performance.now() - overallT0),
-      payloadLength: finalPayload.length,
-      rawContentLength: rawContent.length,
-      finalContentLength: finalContent.length,
-      removedCharacters: rawContent.length - finalContent.length,
-      wordsRemoved: removedWordsTotal,
-      estimatedSecondsOfSpeechRemoved: Number(removedSeconds.toFixed(2)),
-      nominalSegmentCoverageSeconds: Number(nominalCoverage.toFixed(2)),
-      linesDroppedEntirely
-    });
-    ytLog('info', '[Q5] Final filtered content (truncated for console):', ytSnippet(finalContent));
-    ytLog('info', '[Q5] Full JSON payload (truncated for console):', ytSnippet(finalPayload));
-
-    return finalPayload;
   }
 
   /* 
@@ -3344,59 +2829,49 @@
   /* ==========================================================================
    * READ-ALOUD (TTS) SUBSYSTEM — Qwen/Qwen3-TTS via DeepInfra
    * ==========================================================================
-   * Two-stage pipeline, mirroring the generateLLMFilename philosophy:
+   * Two-stage pipeline:
+   *   Stage 1 (LLM text prep): streams a rewrite of the raw markdown reply as
+   *   plain speakable prose. Paragraphs (two consecutive newlines) are fed to
+   *   stage 2 the moment they complete, so the first synthesis request ships
+   *   after the FIRST PARAGRAPH, not after the whole prep pass.
+   *   Stage 2 (synthesis): one POST per paragraph to v1/audio/speech,
+   *   requested as raw PCM (16-bit signed LE, mono, 24 kHz). Each response
+   *   body is consumed to COMPLETION (arrayBuffer), so every body is
+   *   sample-aligned by construction -- no chunk-stitching, no parity
+   *   carry-over, no streaming player state. Each decoded segment is
+   *   scheduled back-to-back on one AudioContext timeline; pause/resume is
+   *   ctx.suspend()/resume(), which freezes the timeline and preserves the
+   *   position with zero bookkeeping.
    *
-   *   Stage 1 (LLM text prep): a separate one-off conversation with the
-   *   configured chat model transforms the RAW MARKDOWN reply into clean,
-   *   speakable prose. It runs after the turn is over and owns its own
-   *   private abort controller, so switching targets can cancel an in-flight
-   *   synthesis without touching the turn's handle.
+   * FAILURE POLICY: each synthesis call gets ONE retry; a second consecutive
+   * failure stops requesting further segments but lets already-scheduled
+   * audio drain to its natural end, after which the error is reported on
+   * the message.
    *
-   *   Stage 2 (synthesis): POST to the OpenAI-compatible v1/audio/speech
-   *   endpoint on the SAME api host (hardcoded model Qwen/Qwen3-TTS),
-   *   requested as RAW PCM (16-bit signed LE, mono, 24 kHz). DeepInfra
-   *   emits the response body progressively (~97ms first byte), so we
-   *   consume res.body as a ReadableStream and schedule each chunk onto
-   *   a Web Audio AudioContext as it arrives -- playback starts with the
-   *   first network packet instead of after the full synthesis. When the
-   *   stream completes, the accumulated PCM is wrapped with a WAV header
-   *   and cached, so replays/resumes keep the zero-cost semantics below.
+   * CACHING: the concatenated PCM of a fully successful session is cached
+   * per-message (WeakMap keyed by the response container, so it dies with
+   * the node on edit/retry). A re-tap replays it through the same scheduler
+   * with zero API traffic. Only complete sessions are cached.
    *
-   * CACHING: the completed audio (WAV blob URL + Audio element) is cached
-   * per-message in a WeakMap keyed by the response container. A re-tap of
-   * an already-finished message plays the cached WAV from the start with
-   * zero new API charges. Only one message speaks at a time; starting a
-   * new one stops the old (an in-flight STREAM is aborted and discarded,
-   * as before -- only fully-downloaded audio is ever cached).
+   * STATE MACHINE (the single source of truth for the speak button):
+   *   idle --preparing--> preparing --first audio--> playing --drain--> idle
+   *   preparing --tap--> idle (cancel)      playing --tap--> paused
+   *   paused --tap--> playing               any --switch target--> idle
+   *   preparing/playing --real error--> (drain) --> idle + error text
    * ==========================================================================
    */
   const TTS_MODEL_ID = 'Qwen/Qwen3-TTS';
-  const TTS_PCM_RATE = 24000;  /* Qwen3-TTS PCM: 16-bit signed LE, mono */
-  /* These two constants are the
-   * per-request ceilings IMPOSED BY THE PROVIDERS, not feature limits of
-   * this app -- both are worked around by SEGMENTATION, never by the old
-   * TTS_MAX_CHARS silent truncation (which quietly chopped long replies
-   * mid-sentence and produced mystery-short readings):
-   *   TTS_SYNTH_SEGMENT_CHARS: /v1/audio/speech rejects oversized `input`
-   *     with an opaque HTTP 400; longer prose is cut at sentence
-   *     boundaries and synthesized in sequential requests whose audio is
-   *     scheduled back-to-back on one continuous timeline.
-   *   TTS_PREP_SEGMENT_CHARS: bounds each stage-1 LLM call so its OUTPUT
-   *     always fits inside a single response (a single giant call was
-   *     silently truncated by the provider's default output cap, cutting
-   *     the tail of the prepared speech). The per-chunk prose outputs are
-   *     concatenated afterwards. */
-  const TTS_SYNTH_SEGMENT_CHARS = 1500;
-  const TTS_PREP_SEGMENT_CHARS  = 24000;
+  const TTS_PCM_RATE = 24000;            /* PCM: 16-bit signed LE, mono */
+  const TTS_SYNTH_SEGMENT_CHARS = 1500;  /* /v1/audio/speech input ceiling */
+  const TTS_PREP_SEGMENT_CHARS  = 24000; /* bounds each stage-1 call's output */
 
-  /* Per-message audio cache: contentEl -> { audio, blobUrl }. WeakMap so it
-   * dies with the DOM node when a turn is edited/retried away. */
+  /* Per-message audio cache: contentEl -> { pcm: ArrayBuffer } */
   const ttsAudioCache = new WeakMap();
 
-  /* The message currently fetching or playing:
-   * { contentEl, controller, player }. controller covers the fetch phase;
-   * player (a live PCM stream session) covers the streaming-play phase. */
-  let activeTts = { contentEl: null, controller: null, player: null };
+  /* The single active session. All fields are only mutated by the
+   * transition functions below; the `state` field is what tap dispatch
+   * reads -- never a combination of button classes and cache contents. */
+  let TTS = { state: 'idle', contentEl: null, controller: null, ctx: null, scheduler: null, pcm: [], error: null };
 
   function speakBtnOf(contentEl) {
     return contentEl?.parentElement?.querySelector('.speak-btn') || null;
@@ -3408,188 +2883,106 @@
     btn.classList.toggle('busy', mode === 'busy');
     btn.classList.toggle('playing', mode === 'playing');
     btn.innerHTML = (mode === 'playing') ? useIcon('stop', 14, 14) : useIcon('speech', 14, 14);
-    /* The busy tooltip stays deliberately STATIC (no per-stage/per-chunk
-     * telemetry: verbosity is reserved for actual errors): the only thing
-     * the user ever needs to know while blinking is that it can be
-     * cancelled. */
     btn.title = (mode === 'busy') ? 'Preparing — tap to cancel'
               : (mode === 'playing') ? 'Pause speech'
               : 'Read aloud';
   }
 
-  /**
-   * Splits text into speakable segments, each no longer than maxLen,
-   * cutting only at sentence boundaries (falling back to word, then
-   * character boundaries for pathological unbroken runs such as long
-   * URLs). Delimiters stay attached to the sentence they terminate so the
-   * TTS engine hears natural pauses. NEVER truncates: every input
-   * character ends up in exactly one segment.
-   */
+  /* Raw PCM (Int16 LE) -> AudioBuffer at the context's rate. */
+  function pcmToAudioBuffer(ctx, pcm) {
+    const n = pcm.byteLength >> 1;
+    const dv = new DataView(pcm);
+    const f32 = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    buf.copyToChannel(f32, 0);
+    return buf;
+  }
+
+  /* Gapless segment scheduler on one AudioContext. schedule() queues one
+   * completed PCM body; close() declares that no more segments will arrive
+   * and arms drain detection (onDrain fires when the last source ends, or
+   * immediately if none is live); stop() tears everything down without
+   * firing onDrain. */
+  function createPcmScheduler(ctx, onDrain) {
+    let nextTime = 0, live = 0, closed = false, halted = false;
+    return {
+      schedule(pcm) {
+        if (halted) return;
+        const src = ctx.createBufferSource();
+        src.buffer = pcmToAudioBuffer(ctx, pcm);
+        const at = Math.max(nextTime, ctx.currentTime);
+        src.start(at);
+        nextTime = at + src.buffer.duration;
+        src.connect(ctx.destination);
+        live++;
+        src.onended = () => { live--; if (live === 0 && closed && !halted) onDrain(); };
+      },
+      close() { closed = true; if (live === 0 && !halted) onDrain(); },
+      stop() { halted = true; try { ctx.close(); } catch {} }
+    };
+  }
+
+  /* Prose sink: stage-1 deltas in, TTS-ready segments out. ONE segment is
+   * one paragraph (two consecutive newlines); a paragraph longer than
+   * maxLen is cut at sentence (then word) boundaries -- the safety valve
+   * for a model that emits one giant paragraph, without which first-sound
+   * latency would regress to barrier behaviour. end() flushes the tail.
+   * The batch chunker below is this same policy with a whole text pushed
+   * at once, so stage-1 input chunking and stage-2 feeding share ONE
+   * implementation of the boundary rules. */
+  function createProseSink(maxLen, onSegment) {
+    let buf = '';
+    const cutFrom = (window) => {
+      for (let i = window.length - 1; i >= 0; i--) {
+        if ('.!?\n。！？'.includes(window[i])) return i + 1;
+      }
+      const w = Math.max(window.lastIndexOf(' '), window.lastIndexOf(','), window.lastIndexOf(';')) + 1;
+      return w > 0 ? w : window.length;
+    };
+    const drainOverhead = () => {
+      while (buf.length > maxLen) {
+        const cut = cutFrom(buf.slice(0, maxLen));
+        const s = buf.slice(0, cut).trim();
+        buf = buf.slice(cut);
+        if (s) onSegment(s);
+      }
+    };
+    return {
+      push(delta) {
+        buf += String(delta).replace(/\r\n/g, '\n');
+        drainOverhead();
+        for (;;) {
+          const i = buf.indexOf('\n\n');
+          if (i === -1) break;
+          const para = buf.slice(0, i).trim();
+          buf = buf.slice(i + 2);
+          if (para) onSegment(para);
+        }
+      },
+      end() {
+        drainOverhead();
+        const t = buf.trim();
+        buf = '';
+        if (t) onSegment(t);
+      }
+    };
+  }
+
+  /* Batch entry point (stage-1 input chunking): the same sink, fed whole. */
   function segmentTextForTts(text, maxLen) {
     const out = [];
-    let current = '';
-    const flush = () => { if (current.trim()) out.push(current.trim()); current = ''; };
-    const sentences = text.match(/[^.!?\n。！？]+[.!?\n。！？]+|[^.!?\n。！？]+$/g) || [];
-    for (const s of sentences) {
-      if (s.length <= maxLen) {
-        if (current.length + s.length > maxLen) flush();
-        current += s;
-      } else {
-        /* Single sentence longer than the ceiling: split on word
-         * boundaries where possible, hard-cut otherwise. */
-        flush();
-        let rest = s;
-        while (rest.length > maxLen) {
-          const slice = rest.slice(0, maxLen);
-          const cut = Math.max(slice.lastIndexOf(' '), slice.lastIndexOf(','), slice.lastIndexOf(';'));
-          const at = cut > maxLen * 0.5 ? cut + 1 : maxLen;
-          out.push(rest.slice(0, at).trim());
-          rest = rest.slice(at);
-        }
-        current = rest;
-      }
-    }
-    flush();
+    const sink = createProseSink(maxLen, s => out.push(s));
+    sink.push(text);
+    sink.end();
     return out;
   }
 
-  /**
-   * Incremental sibling of segmentTextForTts: fed prose DELTAS as they
-   * stream out of stage 1, it returns segments as soon as each one has
-   * accumulated to the provider ceiling, cut at sentence (then word)
-   * boundaries. This is what lets synthesis start while stage 1 is still
-   * generating: the first TTS request ships once ~maxLen prose chars
-   * exist, not after the entire prep pass finishes. Segments smaller than
-   * 30% of the ceiling are deliberately held back (a tiny leading sentence
-   * is merged into the next one) so early deltas don't spawn
-   * micro-segments and a burst of tiny billable TTS calls.
-   */
-  function createTtsSegmenter(maxLen) {
-    let buf = '';
-    return {
-      push(delta) {
-        buf += delta;
-        const ready = [];
-        while (buf.length >= maxLen) {
-          const window = buf.slice(0, maxLen);
-          let cut = -1;
-          for (let i = window.length - 1; i >= Math.floor(maxLen * 0.3); i--) {
-            if ('.!?\n。！？'.includes(window[i])) { cut = i + 1; break; }
-          }
-          if (cut < 0) cut = Math.max(window.lastIndexOf(' '), window.lastIndexOf(','), window.lastIndexOf(';')) + 1;
-          if (cut <= 0) cut = maxLen;
-          ready.push(window.slice(0, cut).trim());
-          buf = buf.slice(cut);
-        }
-        return ready;
-      },
-      flush() {
-        const tail = buf.trim();
-        buf = '';
-        return tail ? [tail] : [];
-      }
-    };
-  }
-
-  /**
-   * Wraps accumulated raw PCM chunks (s16le mono) in a 44-byte WAV header
-   * so the standard <audio> element -- and thus the existing cache/pause
-   * machinery -- can play them like any other file.
-   */
-  function pcmChunksToWavBlob(chunks, sampleRate) {
-    const dataLen = chunks.reduce((n, c) => n + c.byteLength, 0);
-    const buf = new ArrayBuffer(44 + dataLen);
-    const dv = new DataView(buf);
-    const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
-    writeStr(0, 'RIFF'); dv.setUint32(4, 36 + dataLen, true); writeStr(8, 'WAVE');
-    writeStr(12, 'fmt '); dv.setUint32(16, 16, true);   /* fmt chunk size   */
-    dv.setUint16(20, 1, true);                          /* PCM              */
-    dv.setUint16(22, 1, true);                          /* mono              */
-    dv.setUint32(24, sampleRate, true);
-    dv.setUint32(28, sampleRate * 2, true);             /* byte rate        */
-    dv.setUint16(32, 2, true);                          /* block align      */
-    dv.setUint16(34, 16, true);                         /* bits per sample  */
-    writeStr(36, 'data'); dv.setUint32(40, dataLen, true);
-    let off = 44;
-    for (const c of chunks) { new Uint8Array(buf, off).set(c); off += c.byteLength; }
-    return new Blob([buf], { type: 'audio/wav' });
-  }
-
-  /**
-   * A live PCM playback session. Chunks arriving off the network are
-   * converted to AudioBuffers and scheduled back-to-back on the shared
-   * AudioContext timeline, so the very first packet is audible ~instantly.
-   *
-   * pause() = ctx.suspend(): the audio timeline (and currentTime) freeze,
-   * scheduled nodes hold, and resume() continues from the exact sample --
-   * which preserves the "pause/resume keeps position" contract for the
-   * streaming phase just as audio.pause() does for the cached phase.
-   */
-  function createPcmStreamPlayer(ctx) {
-    let nextTime = 0;        /* timeline position for the next chunk       */
-    let tail = new Uint8Array(0); /* bytes of a split 16-bit sample       */
-    let lastNode = null, lastNodeEnded = false, finished = false, stopped = false, started = false;
-    const player = {
-      paused: false,
-      onplaying: null, onpaused: null, onended: null,
-      push(bytes) {
-        if (stopped) return;
-        /* Merge any split-sample remainder, keep whole 16-bit frames. */
-        const all = new Uint8Array(tail.length + bytes.byteLength);
-        all.set(tail); all.set(new Uint8Array(bytes), tail.length);
-        const even = all.length & ~1;
-        const usable = all.subarray(0, even);
-        tail = all.slice(even);
-        const n = usable.length >> 1;
-        if (!n) return;
-        const dv = new DataView(usable.buffer, usable.byteOffset, even);
-        const f32 = new Float32Array(n);
-        for (let i = 0; i < n; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
-        const buf = ctx.createBuffer(1, n, ctx.sampleRate);
-        buf.copyToChannel(f32, 0);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        const startAt = Math.max(nextTime, ctx.currentTime); /* no gaps */
-        src.start(startAt);
-        nextTime = startAt + buf.duration;
-        src.connect(ctx.destination);
-        lastNode = src;
-        lastNodeEnded = false;
-        src.onended = () => {
-          if (src === lastNode) lastNodeEnded = true;
-          if (finished && !stopped && src === lastNode) player.onended?.();
-        };
-        if (!started && !player.paused) { started = true; player.onplaying?.(); }
-      },
-      /* finish() may now be called long after the last scheduled node has
-       * already drained (multi-segment synthesis: the final HTTP body can
-       * complete after the last audio chunk stopped playing, or be empty
-       * while earlier segments already made sound). The old version only
-       * fired onended when finish() ran BEFORE any node existed, so a
-       * finish()-after-drain left the button stuck in the playing state
-       * forever. lastNodeEnded remembers the drain so finish() fires the
-       * terminal callback either way. */
-      finish() {
-        finished = true;
-        if ((lastNodeEnded || !lastNode) && !stopped) player.onended?.();
-      },
-      pause()  { if (!stopped) { player.paused = true;  ctx.suspend(); player.onpaused?.();  } },
-      resume() { if (!stopped) { player.paused = false; ctx.resume();  player.onplaying?.(); } },
-      stop()   { if (!stopped) { stopped = true; try { ctx.close(); } catch {} } }
-    };
-    return player;
-  }
-
-  /**
-   * Stage 1, STREAMING: asks the configured chat model to rewrite the raw
-   * markdown reply as plain speakable prose, and hands each prose delta
-   * to onProseDelta the moment it arrives -- the consumer (runTtsPipeline)
-   * starts TTS synthesis from the first ready segment while this pass is
-   * still generating. No input limit: the raw markdown is chunked only so
-   * each response's OUTPUT fits its token budget, and the model is told
-   * never to shorten anything. Every failure carries the stage label,
-   * model name, chunk index/size and full HTTP detail.
-   */
+  /* Stage 1, STREAMING: rewrites raw markdown as speakable prose and calls
+   * onProseDelta per token. Input is chunked by segmentTextForTts so each
+   * response's OUTPUT fits its token budget; the model is told never to
+   * shorten anything. Failures carry the stage label, model name, chunk
+   * index and HTTP detail. */
   async function streamTtsPrepText(rawMarkdown, signal, onProseDelta) {
     const chunks = segmentTextForTts(rawMarkdown, TTS_PREP_SEGMENT_CHARS);
     for (let i = 0; i < chunks.length; i++) {
@@ -3599,11 +2992,11 @@
       try {
         res = await apiFetch(CONFIG.apiPath, {
           model: CONFIG.model,
-          reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions, instead of following them */
-          service_tier: 'priority', /* To reduce latency */
-          stream: true, /* THE PIPELINE CHANGE: prose flows out per-token, feeding synthesis below */
+          reasoning_effort: 'low',
+          service_tier: 'priority',
+          stream: true,
           temperature: 0.1,
-          max_tokens: 16384, /* explicit ceiling so the provider default cannot silently truncate */
+          max_tokens: 16384,
           messages: [
             { role: 'system', content:
                 'Transform the given Markdown input ' +
@@ -3615,22 +3008,21 @@
                 '4. Transform tables into readable prose. Highlight the differences between cells.\n' +
                 '5. Preserve the original language and all substantive information.\n' +
                 '6. Output ONLY the text to be read aloud, without preambles or anything else.\n' +
-                '7. Do NOT truncate, shorten, summarize or skip ANY part of the input, ' +
+                '7. Separate paragraphs with a blank line.\n' +
+                '8. Do NOT truncate, shorten, summarize or skip ANY part of the input, ' +
                 'no matter how long it is. The output must cover the entire input.' },
             { role: 'user', content: chunks[i] }
           ]
         }, signal);
       } catch (e) {
         if (e.name === 'AbortError') throw e;
-        /* fetch() threw before any HTTP response existed: network / CSP /
-         * DNS level failure, NOT a server-side rejection. */
         throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
       }
       if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
       if (!res.body) throw new Error(stage + ' failed: the transport did not expose a streaming response body');
 
       const reader = res.body.getReader(), decoder = new TextDecoder();
-      let buffer = '', anyContent = false;
+      let buffer = '';
       const abortStream = () => { try { reader.cancel(); } catch (e) {} };
       signal.addEventListener('abort', abortStream);
       try {
@@ -3645,9 +3037,7 @@
             if (!trimmed.startsWith('data:') || trimmed === 'data: [DONE]') continue;
             try {
               const delta = JSON.parse(trimmed.slice(5).trim())?.choices?.[0]?.delta;
-              /* Only final-answer content is prose; reasoning deltas are
-               * ignored, same as in streamChatCompletion. */
-              if (delta?.content) { anyContent = true; onProseDelta(delta.content); }
+              if (delta?.content) onProseDelta(delta.content);
             } catch (e) {}
           }
         }
@@ -3657,303 +3047,205 @@
       if (signal.aborted) {
         const e = new Error('Aborted'); e.name = 'AbortError'; throw e;
       }
-      if (!anyContent) throw new Error(stage + ' failed: the model returned no content');
     }
   }
 
-  /**
-   * Stops whatever message is currently fetching or playing. An in-flight
-   * stream is aborted AND its playback session torn down -- nothing was
-   * fully downloaded, so nothing is cached (same contract as before).
-   * A finished message keeps its cached WAV for later free replay.
-   */
-  function stopActiveTts() {
-    if (!activeTts.contentEl) return;
-    if (activeTts.controller) activeTts.controller.abort();
-    if (activeTts.player) activeTts.player.stop();
-    const entry = ttsAudioCache.get(activeTts.contentEl);
-    if (entry?.audio) entry.audio.pause();
-    setSpeakIcon(activeTts.contentEl, 'idle');
-    activeTts = { contentEl: null, controller: null, player: null };
-  }
-
-  /* Case 1: the tapped message is already active -> pause/resume toggle,
-   * on the live PCM stream while still downloading, or on the cached
-   * audio after. */
-  function toggleTtsPlayback(contentEl) {
-    const entry = ttsAudioCache.get(contentEl);
-    if (activeTts.player) {
-      activeTts.player.paused ? activeTts.player.resume() : activeTts.player.pause();
-    } else if (entry?.audio) {
-      entry.audio.paused ? entry.audio.play() : entry.audio.pause();
-    }
-  }
-
-  /* Creates + unlocks the AudioContext and PCM stream player synchronously
-   * inside the click gesture (BEFORE any awaits, so autoplay policy never
-   * blocks the later async playback start). Wires the player's icon
-   * transitions to the tapped message. */
-  function startStreamingTts(contentEl) {
-    /* 24 kHz matches the PCM stream, so no resampling happens in the
-     * browser. */
-    const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
-    ctx.resume();
-    const player = createPcmStreamPlayer(ctx);
-    activeTts.player = player;
-
-    player.onplaying = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
-    player.onpaused  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
-    player.onended   = () => {
-      player.stop(); /* playback drained: close the AudioContext */
-      if (activeTts.contentEl === contentEl) {
-        activeTts = { contentEl: null, controller: null, player: null };
-        setSpeakIcon(contentEl, 'idle');
-      }
-    };
-    return player;
-  }
-
-  /**
-   * Stage 2 streaming core for ONE segment: consumes the PCM body
-   * progressively, making each network chunk audible immediately while
-   * the server is still synthesizing, and returns the raw chunks so the
-   * caller can assemble the whole-session WAV afterwards. Does NOT call
-   * player.finish(): with multi-segment synthesis the session only ends
-   * after the LAST segment's body completes (see runTtsPipeline).
-   *
-   * BYTE PARITY IS TRACKED PER RESPONSE BODY, never across bodies. Each
-   * /v1/audio/speech response is an independent synthesis that starts on
-   * a sample boundary; the old player-level carry-over assumed one
-   * continuous stream (true in the single-request era), so a body ending
-   * on an odd byte would weld its stray low byte onto the NEXT segment's
-   * first byte, shifting every later sample by one byte -- i.e. harsh
-   * static for the rest of the message after a clean first segment. A
-   * stray final byte of a body can never be legitimately completed by
-   * the next body, so it is dropped (half a sample = 21 microseconds,
-   * inaudible) and reported to the console for field diagnosis.
-   */
-  async function pumpTtsPcmBody(res, player, onStrayByte) {
-    const reader = res.body.getReader();
-    const chunks = [];
-    let pending = new Uint8Array(0); /* odd-byte remainder of THIS body only */
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      /* Merge with this body's own parity remainder, keep whole 16-bit frames. */
-      const all = new Uint8Array(pending.length + value.byteLength);
-      all.set(pending); all.set(value, pending.length);
-      const even = all.length & ~1;
-      const usable = all.subarray(0, even);
-      pending = all.slice(even);
-      if (usable.length) { chunks.push(usable); player.push(usable); }
-    }
-    if (pending.length && onStrayByte) onStrayByte(pending.length);
-    return chunks;
-  }
-
-  async function synthesizeTtsSegment(text, segIndex, player, signal, allChunks) {
-    const stage = 'TTS STAGE 2 (speech synthesis, model ' + TTS_MODEL_ID + '), segment ' + segIndex + ' (' + text.length + ' chars)';
+  /* Stage 2, ONE call: synthesize one segment and return its complete PCM
+   * body. service_tier: 'priority' only on the session's first segment
+   * (click-to-first-sound latency), default afterwards -- playback runs
+   * slower than the engine, so later segments need no priority. */
+  async function synthesizeSegmentOnce(text, tier, signal) {
+    const stage = 'TTS STAGE 2 (speech synthesis, model ' + TTS_MODEL_ID + '), segment (' + text.length + ' chars)';
     let res;
     try {
-      res = await apiFetch('v1/audio/speech', {
+      res = await apiFetch('v1/audio/speech', Object.assign({
         model: TTS_MODEL_ID,
         input: text,
         voice: CONFIG.ttsVoice,
         language: 'Auto',
         instruct: CONFIG.ttsInstruct,
-        response_format: 'pcm', /* raw 16-bit LE mono @ 24 kHz: streams */
-        service_tier: 'priority' /* to reduce latency */
-      }, signal);
+        response_format: 'pcm'
+      }, tier ? { service_tier: tier } : {}), signal);
     } catch (e) {
       if (e.name === 'AbortError') throw e;
       throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
     }
     if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
-    if (!res.body) throw new Error(stage + ' failed: the transport did not expose a streaming response body');
-    let chunks;
-    try {
-      chunks = await pumpTtsPcmBody(res, player, (n) => {
-        /* Field diagnostic, deliberately console-only: a UI error for a
-         * dropped half-sample would be noise, but this line confirms (or
-         * rules out) the cross-body parity theory on real hardware. */
-        console.warn(stage + ': dropped ' + n + ' stray byte(s) at body end to preserve sample alignment');
-      });
-    } catch (e) {
-      if (e.name === 'AbortError') throw e;
-      throw new Error(stage + ' failed while streaming audio: ' + (e.message || e));
+    let pcm = await res.arrayBuffer();
+    if (!pcm.byteLength) throw new Error(stage + ' failed: the server returned an empty audio body');
+    /* Defensive only: a body should always be whole-sample aligned; a stray
+     * trailing byte is a server bug worth a console line, nothing more. */
+    if (pcm.byteLength & 1) {
+      console.warn(stage + ': odd-length PCM body, dropping final byte');
+      pcm = pcm.slice(0, pcm.byteLength - 1);
     }
-    if (!chunks.length) throw new Error(stage + ' failed: the server returned an empty audio body');
-    /* chunks are already whole-frame-aligned per body, so the whole-session
-     * WAV cache inherits the fix: no byte drift across segment joins. */
-    allChunks.push(...chunks);
+    return pcm;
   }
 
-  /**
-   * Assembles the finished-session cache entry from ALL accumulated PCM
-   * chunks (every segment concatenated), so a re-tap replays the ENTIRE
-   * message for free, exactly as before segmentation existed.
-   */
-  function buildTtsCacheEntry(allChunks, contentEl) {
-    const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(allChunks, TTS_PCM_RATE));
-    const audio = new Audio(blobUrl);
-    audio.onplay   = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
-    audio.onpause  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
-    audio.onended  = () => {
-      audio.currentTime = 0; /* so a re-tap replays from the start */
-      if (activeTts.contentEl === contentEl) {
-        activeTts = { contentEl: null, controller: null, player: null };
-        setSpeakIcon(contentEl, 'idle');
-      }
-    };
-    return { audio, blobUrl };
+  /* Retry-once wrapper: transient hiccups get a second chance; a second
+   * consecutive failure propagates (the caller then drains + reports). */
+  async function synthesizeSegment(text, tier, signal) {
+    try { return await synthesizeSegmentOnce(text, tier, signal); }
+    catch (e) {
+      if (e.name === 'AbortError') throw e;
+      return await synthesizeSegmentOnce(text, tier, signal);
+    }
   }
 
-  /**
-   * THE PIPELINE. Two concurrent lanes over an ordered work queue:
-   *   - prep lane: streamTtsPrepText streams prose deltas out of stage 1,
-   *     feeds them to an incremental segmenter, and enqueues ready
-   *     TTS segments.
-   *   - synth lane: a FIFO worker that synthesizes each segment and pumps
-   *     its PCM into the player as it arrives.
-   * There is NO barrier between the stages: the first synthesis request
-   * leaves as soon as the first ~TTS_SYNTH_SEGMENT_CHARS of prose exist,
-   * while stage 1 is still generating. Error precedence: the first lane
-   * to fail with a real (non-abort) error records it in `failure` and
-   * aborts the other lane, whose teardown surfaces as an AbortError that
-   * is deliberately NOT reported -- so a mid-pipeline user cancel stays
-   * silent, and a real failure is never masked by the abort it causes.
-   * Returns all accumulated raw PCM chunks (for the session WAV cache).
-   */
-  async function runTtsPipeline(rawMarkdown, controller, player) {
-    const seg = createTtsSegmenter(TTS_SYNTH_SEGMENT_CHARS);
+  /* THE PIPELINE. Two concurrent lanes, no barrier:
+   *   - prep lane: streamTtsPrepText streams prose deltas into the prose
+   *     sink; each completed paragraph becomes a queue entry.
+   *   - synth lane: a FIFO worker, one segment at a time (never parallel:
+   *     segment order must match scheduling order), each completed PCM body
+   *     handed to onSegmentPcm the instant it lands.
+   * The one-slot wake gate is safe by single-threadedness: the worker
+   * re-checks queue/prepDone before suspending. Error precedence: a real
+   * error from either lane aborts the other (whose teardown surfaces as a
+   * deliberately unreported AbortError) and is rethrown; a genuine
+   * AbortError (user cancel / target switch) propagates silently. */
+  async function runTtsPipeline(rawMarkdown, controller, onSegmentPcm) {
     const queue = [];
-    let prepDone = false;
-    /* One-slot wake gate. Safe by single-threadedness: the worker always
-     * re-checks the queue/prepDone before suspending, and the producer
-     * only runs while the worker is suspended, so a notify with no waiter
-     * is always followed by a live-state re-check. */
-    let gateResolve = null;
-    const wake = () => { if (gateResolve) { const r = gateResolve; gateResolve = null; r(); } };
-
-    const allChunks = [];
-    let segIndex = 0;
-    let failure = null;
+    let prepDone = false, wake = null, first = true;
+    const wakeAll = () => { if (wake) { const w = wake; wake = null; w(); } };
 
     const synthLane = (async () => {
-      try {
-        for (;;) {
-          while (queue.length === 0 && !prepDone) {
-            await new Promise(r => { gateResolve = r; });
-          }
-          if (queue.length === 0) return; /* prep done and drained */
-          const text = queue.shift();
-          segIndex++;
-          await synthesizeTtsSegment(text, segIndex, player, controller.signal, allChunks);
-        }
-      } catch (e) {
-        if (!failure && e.name !== 'AbortError') failure = e;
-        controller.abort(); /* tear the other lane down too */
-        throw failure || e;
+      for (;;) {
+        while (queue.length === 0 && !prepDone) await new Promise(r => { wake = r; });
+        if (queue.length === 0) return;
+        const text = queue.shift();
+        const tier = first ? 'priority' : '';
+        const pcm = await synthesizeSegment(text, tier, controller.signal);
+        first = false;
+        onSegmentPcm(pcm);
       }
     })();
 
+    const sink = createProseSink(TTS_SYNTH_SEGMENT_CHARS, s => { queue.push(s); wakeAll(); });
     try {
-      await streamTtsPrepText(rawMarkdown, controller.signal, (delta) => {
-        for (const t of seg.push(delta)) { queue.push(t); wake(); }
-      });
-      for (const t of seg.flush()) { queue.push(t); wake(); }
-      prepDone = true;
-      wake();
+      await streamTtsPrepText(rawMarkdown, controller.signal, d => sink.push(d));
+      sink.end();
+      prepDone = true; wakeAll();
       await synthLane;
-      if (failure) throw failure;
-      player.finish();
-      return allChunks;
     } catch (err) {
-      prepDone = true;
-      wake(); /* unstick the worker so it can observe the teardown */
+      prepDone = true; wakeAll();
       controller.abort();
-      try { await synthLane; } catch (e) { if (!failure && e.name !== 'AbortError') failure = e; }
-      if (failure) throw failure;
-      throw err; /* genuine AbortError = deliberate cancel, stays silent */
+      let synthErr = null;
+      try { await synthLane; } catch (e) { synthErr = e; }
+      throw (err.name === 'AbortError' && synthErr && synthErr.name !== 'AbortError') ? synthErr : err;
     }
   }
 
-  /**
-   * Speaker-icon tap handler. Three cases:
-   *  1. This message is already active -> pause/resume toggle, on the live
-   *     PCM stream while still downloading, or on the cached audio after.
-   *  2. Cached WAV exists (stream finished earlier) -> instant replay,
-   *     no API traffic.
-   *  3. Nothing cached -> full pipeline: LLM text prep, then STREAMING TTS
-   *     synthesis (audio starts as the first PCM packet lands, long before
-   *     the response completes). When the download finishes the WAV is
-   *     cached for free replays.
-   */
-  async function toggleSpeak(contentEl, rawMarkdown) {
-    if (!CONFIG || !contentEl || !speakBtnOf(contentEl)) return;
+  function concatPcmBuffers(list) {
+    const len = list.reduce((n, b) => n + b.byteLength, 0);
+    const out = new Uint8Array(len);
+    let off = 0;
+    for (const b of list) { out.set(new Uint8Array(b), off); off += b.byteLength; }
+    return out.buffer;
+  }
 
-    /* Case 0 (busy): this message's own pipeline is still preparing or
-     * synthesizing and nothing is audible yet. A tap here CANCELS it --
-     * previously the busy button ignored all input (pointer-events:none
-     * in CSS), leaving the user stuck blinking through a long stage-1
-     * LLM call with no way out. */
-    if (activeTts.contentEl === contentEl && speakBtnOf(contentEl).classList.contains('busy')) {
-      stopActiveTts();
+  /* --- state machine transitions --- */
+
+  function ttsReset() {
+    TTS = { state: 'idle', contentEl: null, controller: null, ctx: null, scheduler: null, pcm: [], error: null };
+  }
+
+  /* Cancel: aborts everything and stops playback immediately. Used for a
+   * tap on the busy button, and for switching the spoken target. A fully
+   * completed message's cache survives (it lives in ttsAudioCache). */
+  function ttsCancel() {
+    if (TTS.state === 'idle') return;
+    const el = TTS.contentEl;
+    if (TTS.controller) TTS.controller.abort();
+    if (TTS.scheduler) TTS.scheduler.stop();
+    ttsReset();
+    if (el) setSpeakIcon(el, 'idle');
+  }
+
+  function ttsPause() {
+    if (TTS.state !== 'playing') return;
+    TTS.state = 'paused';
+    TTS.ctx.suspend();
+    setSpeakIcon(TTS.contentEl, 'idle');
+  }
+
+  function ttsResume() {
+    if (TTS.state !== 'paused') return;
+    TTS.state = 'playing';
+    TTS.ctx.resume();
+    setSpeakIcon(TTS.contentEl, 'playing');
+  }
+
+  /* Drain: the last scheduled source has ended (or nothing was ever
+   * scheduled). Full success caches the PCM for free replays; a recorded
+   * error is reported on the message now that audio has run out. */
+  function ttsDrained(el) {
+    if (TTS.contentEl !== el || TTS.state === 'idle') return;
+    const error = TTS.error;
+    if (!error && TTS.pcm.length > 0) {
+      ttsAudioCache.set(el, { pcm: concatPcmBuffers(TTS.pcm) });
+    }
+    ttsReset();
+    setSpeakIcon(el, 'idle');
+    if (error) setError(el, error + ' (audio stopped at the point of failure)');
+  }
+
+  /* Start the full pipeline on an uncached message. The AudioContext is
+   * created synchronously inside the click gesture (before any await), so
+   * autoplay policy never blocks playback. On a real failure the pipeline
+   * has already stopped requesting segments; already-scheduled audio
+   * drains and ttsDrained reports the error. */
+  async function ttsStart(contentEl, rawMarkdown) {
+    const controller = new AbortController();
+    const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
+    ctx.resume();
+    const scheduler = createPcmScheduler(ctx, () => ttsDrained(contentEl));
+    TTS = { state: 'preparing', contentEl, controller, ctx, scheduler, pcm: [], error: null };
+    setSpeakIcon(contentEl, 'busy');
+    try {
+      await runTtsPipeline(rawMarkdown, controller, (pcm) => {
+        TTS.pcm.push(pcm);
+        scheduler.schedule(pcm);
+        if (TTS.state === 'preparing') { TTS.state = 'playing'; setSpeakIcon(contentEl, 'playing'); }
+      });
+      scheduler.close(); /* arm drain; state is 'playing' until the last source ends */
+    } catch (err) {
+      if (err.name === 'AbortError') { ttsCancel(); return; }
+      TTS.error = (err.message || 'Speech synthesis failed') +
+        ' (source reply: ' + rawMarkdown.length + ' chars)';
+      scheduler.close(); /* drain, then ttsDrained reports the error */
+    }
+  }
+
+  /* Replay a cached message through the same scheduler: one buffer, zero
+   * API traffic, identical pause/resume semantics. */
+  function ttsReplay(contentEl) {
+    const cached = ttsAudioCache.get(contentEl);
+    if (!cached) return;
+    const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
+    ctx.resume();
+    const scheduler = createPcmScheduler(ctx, () => ttsDrained(contentEl));
+    TTS = { state: 'playing', contentEl, controller: null, ctx, scheduler, pcm: [cached.pcm], error: null };
+    setSpeakIcon(contentEl, 'playing');
+    scheduler.schedule(cached.pcm);
+    scheduler.close();
+  }
+
+  /* Speaker-icon tap: pure dispatch on (active message?, state). */
+  function toggleSpeak(contentEl, rawMarkdown) {
+    if (!CONFIG || !contentEl || !speakBtnOf(contentEl)) return;
+    if (TTS.contentEl === contentEl) {
+      if (TTS.state === 'preparing') return ttsCancel();
+      if (TTS.state === 'playing')   return ttsPause();
+      if (TTS.state === 'paused')    return ttsResume();
       return;
     }
-
-    /* Case 1: pause/resume toggle. */
-    if (activeTts.contentEl === contentEl) return toggleTtsPlayback(contentEl);
-
-    /* Starting a new message: whatever else was playing stops (its data
-     * stays cached for later). */
-    stopActiveTts();
-    activeTts.contentEl = contentEl;
-    const controller = new AbortController();
-    activeTts.controller = controller;
-    let player = null;
-
-    let entry = ttsAudioCache.get(contentEl);
-    try {
-      /* Case 3: full pipeline (only when no cached audio). runTtsPipeline
-       * overlaps EVERYTHING that can be overlapped: prose streams out of
-       * stage 1, gets segmented mid-flight, synthesis of early segments
-       * runs while later prose is still being generated, and each
-       * segment's PCM is audible as it arrives. When the last segment's
-       * body completes, the whole-session WAV is cached for free
-       * replays. */
-      if (!entry?.blobUrl) {
-        setSpeakIcon(contentEl, 'busy');
-        player = startStreamingTts(contentEl);
-        const allChunks = await runTtsPipeline(rawMarkdown, controller, player);
-        entry = buildTtsCacheEntry(allChunks, contentEl);
-        ttsAudioCache.set(contentEl, entry);
-        return; /* keep playing via the live stream; the cache is ready */
-      }
-
-      /* Case 2: replay the cached WAV. */
-      await entry.audio.play();
-    } catch (err) {
-      player?.stop();
-      if (activeTts.contentEl === contentEl) {
-        activeTts = { contentEl: null, controller: null, player: null };
-        setSpeakIcon(contentEl, 'idle');
-        /* An AbortError here means another message's speak button took
-         * over -- or the user tapped the blinking button to cancel --
-         * and this pipeline was torn down deliberately: nothing to
-         * report. Everything else is reported WITH its stage label,
-         * model name, sizes and HTTP detail, so the user knows exactly
-         * which half of the two-stage pipeline died and why. */
-        if (err.name !== 'AbortError') {
-          setError(contentEl, (err.message || 'Speech synthesis failed') +
-            ' (source reply: ' + rawMarkdown.length + ' chars)');
-        }
-      }
-    }
+    ttsCancel(); /* switching targets: whatever was active stops; its cache survives */
+    if (ttsAudioCache.get(contentEl)) return ttsReplay(contentEl);
+    return ttsStart(contentEl, rawMarkdown);
   }
 
   /**
-   * Adds the read-aloud icon button next to the retry button. (Unchanged.)
+   * Adds the read-aloud icon button next to the retry button.
    */
   function addSpeakButton(contentEl, rawMarkdown) {
     if (!contentEl?.parentElement || !rawMarkdown) return;
@@ -4090,8 +3382,14 @@
       type: 'function',
       function: {
         name: 'get_youtube_transcript',
-        description: 'Retrieves the transcript for a given YouTube video URL or Video ID. ' +
-                     'Use this tool for YouTube.',
+        description: 'Retrieves the transcript for a given YouTube video URL or Video ID; ' +
+                     'sponsor-flagged segments are removed and marked "[...]". ' +
+                     'Use this tool for YouTube. NEVER use web_search or fetch_web_page for YouTube. ' +
+                     'When summarizing a video, start right away with the substance, without ' +
+                     'introductions or boilerplate like the channel name or view count. ' +
+                     'Write plain prose suited to be read aloud by a TTS engine, not bullet points. ' +
+                     'Omit sponsored content and self-promotions. ' +
+                     'Include timestamps as links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).',
         parameters: {
           type: 'object',
           properties: {
