@@ -150,8 +150,9 @@
   }
 
   /* Pure string escaper. Covers the full HTML-sensitive set INCLUDING single
-   * and double quotes, because escaped output is also interpolated into
-   * attribute contexts (data-val, title, etc.) where a bare quote breaks out. */
+   * and double quotes: harmless in element-content contexts, and required
+   * the moment an escaped value is ever interpolated into an attribute
+   * (title, data-*, ...), where a bare quote would break out. */
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, '&amp;')
@@ -217,6 +218,11 @@
     
     --font-term:        "Courier New", Courier, "Liberation Mono", VT323, Consolas, monospace;
     --font-size-base:   19px;
+    /* Textarea auto-grow clamp bounds: the single source of truth for the
+     * input box geometry. autoGrow() reads these back via getComputedStyle,
+     * so the JS clamp can never drift out of sync with the CSS. */
+    --input-min-h:      86px;
+    --input-max-h:      240px;
   }
 
   * {
@@ -646,9 +652,9 @@
     font-family: var(--font-term);
     font-size: var(--font-size-base);
     line-height: 1.45;
-    min-height: 86px;
-    height: 86px;
-    max-height: 240px;
+    min-height: var(--input-min-h);
+    height: var(--input-min-h);
+    max-height: var(--input-max-h);
   }
 
   textarea#promptInput:focus-visible {
@@ -1252,7 +1258,13 @@
 
     <div class="conversation-wrap" id="conversationWrap"></div>
 
-    <!-- STATIC DECLARATIVE SETTINGS SCREEN (Avoids thrashing DOM innerHTML recreation on every modal toggle) -->
+    <!-- STATIC DECLARATIVE SETTINGS SCREEN (Avoids thrashing DOM innerHTML recreation on every modal toggle).
+         NOTE ON PLACEHOLDERS: the form is always pre-filled from DEFAULT_CONFIG
+         (first run) or the stored config (returning users) by loadSettingsIntoForm
+         before this screen can ever become visible, so placeholders on pre-filled
+         fields would never render. Placeholders are therefore kept ONLY on the two
+         secret fields, which are deliberately left empty and serve as format hints.
+         DEFAULT_CONFIG is the single source of truth for every default value. -->
     <div class="settings-screen" id="settingsScreen" style="display:none;">
       <div class="settings-form term-font">
         <div class="settings-header">SYSTEM CONFIGURATION</div>
@@ -1264,7 +1276,7 @@
           <div class="field">
             <label for="field-apiHost">API Host</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-apiHost" class="term-font" placeholder="https://api.deepinfra.com">
+              <input type="text" id="field-apiHost" class="term-font">
               <button type="button" class="history-toggle-btn" data-key="apiHost" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-apiHost" style="display:none;"></div>
             </div>
@@ -1272,7 +1284,7 @@
           <div class="field">
             <label for="field-apiPath">API Path</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-apiPath" class="term-font" placeholder="v1/openai/chat/completions">
+              <input type="text" id="field-apiPath" class="term-font">
               <button type="button" class="history-toggle-btn" data-key="apiPath" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-apiPath" style="display:none;"></div>
             </div>
@@ -1283,11 +1295,11 @@
           </div>
           <div class="field">
             <label for="field-maxTavilyCalls">Max Tavily calls</label>
-            <input type="number" id="field-maxTavilyCalls" class="term-font" placeholder="6" min="0" step="1">
+            <input type="number" id="field-maxTavilyCalls" class="term-font" min="0" step="1">
           </div>
           <div class="field">
             <label for="field-serviceTier">Service Tier</label>
-            <select id="field-serviceTier" class="setting-select term-font">
+            <select id="field-serviceTier" class="term-font">
               <option value="">(default)</option>
               <option value="priority">Priority</option>
               <option value="flex">Flex</option>
@@ -1296,7 +1308,7 @@
           <div class="field">
             <label for="field-model">Default Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-model" class="term-font" placeholder="zai-org/GLM-5.3">
+              <input type="text" id="field-model" class="term-font">
               <button type="button" class="history-toggle-btn" data-key="model" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-model" style="display:none;"></div>
             </div>
@@ -1304,7 +1316,7 @@
           <div class="field">
             <label for="field-visionModel">Vision Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-visionModel" class="term-font" placeholder="Qwen/Qwen3-VL-30B-A3B-Instruct">
+              <input type="text" id="field-visionModel" class="term-font">
               <button type="button" class="history-toggle-btn" data-key="visionModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-visionModel" style="display:none;"></div>
             </div>
@@ -1312,14 +1324,14 @@
           <div class="field">
             <label for="field-imageModel">Image Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-imageModel" class="term-font" placeholder="black-forest-labs/FLUX-2-klein-9b">
+              <input type="text" id="field-imageModel" class="term-font">
               <button type="button" class="history-toggle-btn" data-key="imageModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-imageModel" style="display:none;"></div>
             </div>
           </div>
           <div class="field">
             <label for="field-reasoningEffort">Reasoning Effort</label>
-            <select id="field-reasoningEffort" class="setting-select term-font">
+            <select id="field-reasoningEffort" class="term-font">
               <option value="none">none</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
@@ -1330,7 +1342,7 @@
           </div>
           <div class="field">
             <label for="field-imageResolution">Image Resolution</label>
-            <select id="field-imageResolution" class="setting-select term-font">
+            <select id="field-imageResolution" class="term-font">
               <option value="640x352">360p (640x352)</option>
               <option value="854x480">480p (854x480)</option>
               <option value="1280x720">720p (1280x720)</option>
@@ -1339,14 +1351,14 @@
           </div>
           <div class="field">
             <label for="field-imageQuality">Image Quality</label>
-            <select id="field-imageQuality" class="setting-select term-font">
+            <select id="field-imageQuality" class="term-font">
               <option value="standard">standard</option>
               <option value="hd">hd</option>
             </select>
           </div>
           <div class="field">
             <label for="field-imageStyle">Image Style</label>
-            <select id="field-imageStyle" class="setting-select term-font">
+            <select id="field-imageStyle" class="term-font">
               <option value="natural">natural</option>
               <option value="vivid">vivid</option>
             </select>
@@ -1366,11 +1378,11 @@
           </div>
           <div class="field">
             <label for="field-ttsInstruct">TTS Instruct (tone / style)</label>
-            <input type="text" id="field-ttsInstruct" class="term-font" placeholder="Friendly and relaxed">
+            <input type="text" id="field-ttsInstruct" class="term-font">
           </div>
           <div class="field">
             <label for="field-systemPrompt">System Prompt</label>
-            <textarea id="field-systemPrompt" class="term-font" placeholder="You are a helpful assistant." rows="4"></textarea>
+            <textarea id="field-systemPrompt" class="term-font" rows="4"></textarea>
           </div>
         </div>
         <div class="settings-error error-msg-text term-font" id="settingsError" style="display:none;"></div>
@@ -1405,14 +1417,17 @@
   </div>
 
 <script>
-  /* DOM ELEMENT REFERENCES */
+  /* DOM ELEMENT REFERENCES. Naming convention: each module-level reference
+   * mirrors the id of the element it holds; any parameter or local that
+   * holds a DOM node ends in 'El'; the assistant's response element is
+   * always called contentEl, never 'container'. */
   const conversationWrap = document.getElementById('conversationWrap');
   const promptInput = document.getElementById('promptInput');
   const sendBtn = document.getElementById('sendBtn');
   const sendImgBtn = document.getElementById('sendImgBtn');
   const statusHost = document.getElementById('statusHost');
   const statusModel = document.getElementById('statusModel');
-  const statusbarEl = document.getElementById('statusbar');
+  const statusbar = document.getElementById('statusbar');
   const modelDropdown = document.getElementById('modelDropdown');
   const settingsScreen = document.getElementById('settingsScreen');
   const inputbar = document.getElementById('inputbar');
@@ -1490,17 +1505,17 @@
    * Renders or removes the empty ASCII splash state based on message count.
    */
   function checkEmptyState() {
-    let splash = document.getElementById('emptySplash');
+    let splashEl = document.getElementById('emptySplash');
     if (conversationHistory.length === 0) {
-      if (!splash) {
-        splash = document.createElement('div');
-        splash.id = 'emptySplash';
-        splash.className = 'empty-splash term-font';
-        splash.innerHTML = `${ROBOT_SVG}<div class="splash-title">READY FOR INPUT</div>`;
-        conversationWrap.appendChild(splash);
+      if (!splashEl) {
+        splashEl = document.createElement('div');
+        splashEl.id = 'emptySplash';
+        splashEl.className = 'empty-splash term-font';
+        splashEl.innerHTML = `${ROBOT_SVG}<div class="splash-title">READY FOR INPUT</div>`;
+        conversationWrap.appendChild(splashEl);
       }
-    } else if (splash) {
-      splash.remove();
+    } else if (splashEl) {
+      splashEl.remove();
     }
   }
 
@@ -1570,9 +1585,8 @@
   /**
    * Generates timestamp + tool-availability suffix for system prompts, so the
    * model is always told (a) the current date/time and (b) exactly which tools
-   * it may use this turn -- including the case where no Tavily-backed tools
-   * are configured/allowed at all (the YouTube transcript extractor needs no
-   * API key and therefore remains available even then).
+   * it may use this turn -- including the case where the Tavily-backed tools
+   * are not configured/allowed at all.
    */
   function getFormattedRuntimeContext() {
     const now = new Date();
@@ -1613,12 +1627,17 @@
    * caption track -- what Tavily's crawler can retrieve is what we get.
    * ==========================================================================
    */
+  /* Strict extractor: recognized shapes are a bare 11-char video ID or any
+   * of the standard watch/embed/short/share URL forms. Anything else is NOT
+   * a YouTube target and returns null -- the caller reports a proper tool
+   * error instead of best-effort fetching a garbage watch URL (which
+   * "succeeded" by returning YouTube's error page as transcript content). */
   function extractYouTubeVideoId(input) {
     if (!input) return null;
     const cleaned = input.trim();
     if (/^[a-zA-Z0-9_-]{11}$/.test(cleaned)) return cleaned;
-    const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-    return match ? match[1] : cleaned;
+    const match = cleaned.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+    return match ? match[1] : null;
   }
 
   async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
@@ -1627,7 +1646,7 @@
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
 
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const results = JSON.parse(await executeTavilyExtract([watchUrl], signal));
+    const results = await executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal);
     if (!Array.isArray(results) || results.length === 0) {
       throw new Error("No content returned for the video page.");
     }
@@ -1650,34 +1669,36 @@
   /* 
    * ==========================================================================
    * TAVILY SERVICE INTEGRATION
-   * Directly queries live web data or page contents when called by function-calling.
-   * Both take the current turn's abort signal, so the stop button cancels an
-   * in-flight search. AbortError is rethrown by the callers (not swallowed
-   * into a tool-error result) so the whole turn tears down cleanly.
+   * All web egress goes through Tavily's server-side APIs. The shared
+   * executeTavilyRequest core handles the key guard, POST and error
+   * normalization; the wrappers below only shape per-call payloads. All
+   * entry points take the current turn's abort signal, so the stop button
+   * cancels an in-flight search. AbortError is rethrown by the callers (not
+   * swallowed into a tool-error result) so the whole turn tears down cleanly.
    * ==========================================================================
    */
-  async function executeTavilySearch(query, signal) {
+  async function executeTavilyRequest(endpoint, body, failureMsg, signal) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
-    const res = await fetch('https://api.tavily.com/search', {
+    const res = await fetch('https://api.tavily.com/' + endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
-      body: JSON.stringify({ query: query, max_results: 5, search_depth: 'basic' }),
+      body: JSON.stringify(body),
       signal: signal
     });
-    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Search failed');
-    return JSON.stringify((await res.json()).results || []);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || failureMsg);
+    return (await res.json()).results || [];
+  }
+
+  async function executeTavilySearch(query, signal) {
+    return JSON.stringify(await executeTavilyRequest(
+      'search',
+      { query: query, max_results: 5, search_depth: 'basic' },
+      'Search failed', signal));
   }
 
   async function executeTavilyExtract(urls, signal) {
-    if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
-    const res = await fetch('https://api.tavily.com/extract', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
-      body: JSON.stringify({ urls: Array.isArray(urls) ? urls : [urls] }),
-      signal: signal
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || 'Extraction failed');
-    return JSON.stringify((await res.json()).results || []);
+    const list = Array.isArray(urls) ? urls : [urls];
+    return JSON.stringify(await executeTavilyRequest('extract', { urls: list }, 'Extraction failed', signal));
   }
 
   /**
@@ -1700,23 +1721,23 @@
    */
   let renderScheduled = false, pendingRenderData = null;
 
-  function renderMarkdownThrottled(container, text) {
-    pendingRenderData = { container, text };
+  function renderMarkdownThrottled(contentEl, text) {
+    pendingRenderData = { contentEl, text };
     if (!renderScheduled) {
       renderScheduled = true;
       requestAnimationFrame(() => {
-        if (pendingRenderData) renderMarkdown(pendingRenderData.container, pendingRenderData.text);
+        if (pendingRenderData) renderMarkdown(pendingRenderData.contentEl, pendingRenderData.text);
         renderScheduled = false;
       });
     }
   }
 
-  function renderMarkdown(container, text) {
-    container.classList.remove('placeholder');
-    container.innerHTML = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
+  function renderMarkdown(contentEl, text) {
+    contentEl.classList.remove('placeholder');
+    contentEl.innerHTML = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
       ? DOMPurify.sanitize(marked.parse(text))
       : escapeHtml(text);
-    enhanceCodeBlocks(container);
+    enhanceCodeBlocks(contentEl);
   }
 
   /**
@@ -1739,7 +1760,7 @@
       .split(/\r?\n/)[0]                       /* first line only: narration past line 1 is discarded */
       .split(/[\\/]/).pop()                    /* kill path components outright */
       .replace(/\s+/g, '-')                    /* keep words separated: whitespace -> hyphens */
-      .replace(/[^a-zA-Z0-9._-]/g, '')         /* allowlist only safe chars */
+      .replace(/[^a-zA-Z0-9._-]/g, '')        /* allowlist only safe chars */
       .replace(/-{2,}/g, '-')                  /* collapse hyphen runs */
       .replace(/\.{2,}/g, '.')                 /* collapse '..' runs */
       .replace(/^[-.]+|[-.]+$/g, '');          /* no leading/trailing dots or dashes */
@@ -1759,8 +1780,9 @@
   }
 
   /**
-   * Queries the configured fast LLM model to dynamically generate a clean filename
-   * for code download buttons. Deliberately abortable by nothing: this is a
+   * Queries the configured chat model -- with service_tier 'priority' to
+   * reduce latency -- to dynamically generate a clean filename for code
+   * download buttons. Deliberately abortable by nothing: this is a
    * fire-and-forget subsidiary call and is passed no signal, so it cannot
    * clobber the active turn's abort controller.
    *
@@ -1819,109 +1841,123 @@
     }
   });
 
-  function enhanceCodeBlocks(container) {
-    container.querySelectorAll('pre').forEach((pre) => {
-      let wrapper = pre.parentElement;
-      if (!wrapper || !wrapper.classList.contains('code-block-wrapper')) {
-        wrapper = document.createElement('div');
-        wrapper.className = 'code-block-wrapper';
-        pre.parentNode.insertBefore(wrapper, pre);
-        wrapper.appendChild(pre);
-      }
+  /* Wraps a bare <pre> in the collapsible code-block wrapper (idempotent). */
+  function ensureCodeBlockWrapper(pre) {
+    let wrapper = pre.parentElement;
+    if (!wrapper || !wrapper.classList.contains('code-block-wrapper')) {
+      wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+      pre.parentNode.insertBefore(wrapper, pre);
+      wrapper.appendChild(pre);
+    }
+    return wrapper;
+  }
 
+  /* COLLAPSE / EXPAND BAR FOR LONG BLOCKS. Blocks over 10 lines start
+   * collapsed; expansion state is remembered across re-renders, keyed by
+   * the first 120 chars of the snippet. */
+  function applyCollapseBehavior(wrapper, readCode) {
+    const codeTextNow = readCode();
+    if (codeTextNow.split('\n').length <= 10) {
+      wrapper.classList.remove('collapsed');
+      wrapper.querySelector('.code-expand-bar')?.remove();
+      return;
+    }
+
+    const snippetKey = codeTextNow.slice(0, 120);
+    const isExpanded = expandedCodeBlocksState.get(snippetKey) === true;
+    wrapper.classList.toggle('collapsed', !isExpanded);
+
+    let expandBar = wrapper.querySelector('.code-expand-bar') || document.createElement('div');
+    expandBar.className = 'code-expand-bar';
+    expandBar.innerHTML = isExpanded ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
+    if (!expandBar.parentElement) wrapper.appendChild(expandBar);
+
+    expandBar.onclick = (e) => {
+      e.stopPropagation();
+      const collapsed = wrapper.classList.toggle('collapsed');
+      expandedCodeBlocksState.set(snippetKey, !collapsed);
+      expandBar.innerHTML = !collapsed ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
+    };
+  }
+
+  /* COPY / DOWNLOAD ACTION BUTTONS. Rendered as a freestanding row
+   * OUTSIDE the bordered code-block wrapper, directly below it, matching
+   * the placement and styling philosophy of the edit-prompt and retry
+   * icons. Idempotent: enhanceCodeBlocks re-runs on every render frame
+   * (and renderMarkdown rebuilds the container's DOM each time), so the
+   * nextElementSibling check guards against duplicating the row within a
+   * single frame. */
+  function ensureCodeActions(wrapper, readCode) {
+    let actions = wrapper.nextElementSibling;
+    if (actions && actions.classList.contains('code-actions')) return;
+
+    actions = document.createElement('div');
+    actions.className = 'code-actions';
+    wrapper.parentNode.insertBefore(actions, wrapper.nextSibling);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.title = 'Copy code';
+    copyBtn.setAttribute('aria-label', 'Copy code');
+    copyBtn.innerHTML = useIcon('copy', 14, 14);
+    copyBtn.onclick = async (e) => {
+      e.stopPropagation();
+      try { await navigator.clipboard.writeText(readCode()); } catch (err) {}
+    };
+
+    const dlBtn = document.createElement('button');
+    dlBtn.title = 'Download code';
+    dlBtn.setAttribute('aria-label', 'Download code');
+    dlBtn.innerHTML = useIcon('download', 14, 14);
+    dlBtn.onclick = async (e) => {
+      e.stopPropagation();
+      /* Re-entry guard: while busy the button ignores taps via CSS, but
+       * this guard also protects against the async race of a second
+       * click landing before the class lands. */
+      if (dlBtn.classList.contains('busy')) return;
+      /* Busy blink replaces the old '-- Downloading --' text swap: the
+       * icon stays in place and blinks while the LLM names the file. */
+      dlBtn.classList.add('busy');
+      try {
+        const code = readCode();
+        const filename = sanitizeFilename(await generateLLMFilename(code));
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } finally {
+        dlBtn.classList.remove('busy');
+      }
+    };
+    actions.append(copyBtn, dlBtn);
+  }
+
+  function enhanceCodeBlocks(containerEl) {
+    containerEl.querySelectorAll('pre').forEach((pre) => {
+      const wrapper = ensureCodeBlockWrapper(pre);
       /* The code text is read lazily (at click time) rather than captured
        * in a closure here, because enhanceCodeBlocks re-runs on every
        * render frame while a response is still streaming in. A closure
        * would freeze a truncated mid-stream snapshot. */
       const readCode = () => wrapper.querySelector('code')?.textContent ?? pre.textContent ?? '';
-
-      /* COLLAPSE / EXPAND BAR FOR LONG BLOCKS */
-      const codeTextNow = readCode();
-      if (codeTextNow.split('\n').length > 10) {
-        const snippetKey = codeTextNow.slice(0, 120);
-        const isExpanded = expandedCodeBlocksState.get(snippetKey) === true;
-        wrapper.classList.toggle('collapsed', !isExpanded);
-
-        let expandBar = wrapper.querySelector('.code-expand-bar') || document.createElement('div');
-        expandBar.className = 'code-expand-bar';
-        expandBar.innerHTML = isExpanded ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
-        if (!expandBar.parentElement) wrapper.appendChild(expandBar);
-
-        expandBar.onclick = (e) => {
-          e.stopPropagation();
-          const collapsed = wrapper.classList.toggle('collapsed');
-          expandedCodeBlocksState.set(snippetKey, !collapsed);
-          expandBar.innerHTML = !collapsed ? `${useIcon('chevronUp', 12, 12)} COLLAPSE` : `${useIcon('chevronDown', 12, 12)} EXPAND`;
-        };
-      } else {
-        wrapper.classList.remove('collapsed');
-        wrapper.querySelector('.code-expand-bar')?.remove();
-      }
-
-      /* COPY / DOWNLOAD ACTION BUTTONS. Rendered as a freestanding row
-       * OUTSIDE the bordered code-block wrapper, directly below it,
-       * matching the placement and styling philosophy of the edit-prompt
-       * and retry icons. Idempotent: enhanceCodeBlocks re-runs on every
-       * render frame (and renderMarkdown rebuilds the container's DOM
-       * each time), so the nextElementSibling check guards against
-       * duplicating the row within a single frame. */
-      let actions = wrapper.nextElementSibling;
-      if (!actions || !actions.classList.contains('code-actions')) {
-        actions = document.createElement('div');
-        actions.className = 'code-actions';
-        wrapper.parentNode.insertBefore(actions, wrapper.nextSibling);
-
-        const copyBtn = document.createElement('button');
-        copyBtn.title = 'Copy code';
-        copyBtn.setAttribute('aria-label', 'Copy code');
-        copyBtn.innerHTML = useIcon('copy', 14, 14);
-        copyBtn.onclick = async (e) => {
-          e.stopPropagation();
-          try { await navigator.clipboard.writeText(readCode()); } catch (err) {}
-        };
-
-        const dlBtn = document.createElement('button');
-        dlBtn.title = 'Download code';
-        dlBtn.setAttribute('aria-label', 'Download code');
-        dlBtn.innerHTML = useIcon('download', 14, 14);
-        dlBtn.onclick = async (e) => {
-          e.stopPropagation();
-          /* Re-entry guard: while busy the button ignores taps via CSS, but
-           * this guard also protects against the async race of a second
-           * click landing before the class lands. */
-          if (dlBtn.classList.contains('busy')) return;
-          /* Busy blink replaces the old '-- Downloading --' text swap: the
-           * icon stays in place and blinks while the LLM names the file. */
-          dlBtn.classList.add('busy');
-          try {
-            const code = readCode();
-            const filename = sanitizeFilename(await generateLLMFilename(code));
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
-            a.download = filename;
-            a.click();
-            URL.revokeObjectURL(a.href);
-          } finally {
-            dlBtn.classList.remove('busy');
-          }
-        };
-        actions.append(copyBtn, dlBtn);
-      }
+      applyCollapseBehavior(wrapper, readCode);
+      ensureCodeActions(wrapper, readCode);
     });
   }
 
-  function setError(container, message) {
-    container.classList.remove('placeholder');
-    dismissThinking(container);
-    container.innerHTML += `<div class="error-msg-text">&lt; ERROR: ${escapeHtml(message)} &gt;</div>`;
+  function setError(contentEl, message) {
+    contentEl.classList.remove('placeholder');
+    dismissThinking(contentEl);
+    contentEl.innerHTML += `<div class="error-msg-text">&lt; ERROR: ${escapeHtml(message)} &gt;</div>`;
   }
   
-  function finalizeStoppedResponse(container, text) {
+  function finalizeStoppedResponse(contentEl, text) {
     pendingRenderData = null;
-    container.classList.remove('placeholder');
-    dismissThinking(container);
-    if (text) renderMarkdown(container, text); else container.textContent = '';
-    container.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
+    contentEl.classList.remove('placeholder');
+    dismissThinking(contentEl);
+    if (text) renderMarkdown(contentEl, text); else contentEl.textContent = '';
+    contentEl.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
   }
 
   /* Persistent (non-ephemeral) error text for the settings form, shown
@@ -1956,18 +1992,18 @@
     dropdown.innerHTML = '';
 
     if (list.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'history-item amber-txt';
-      empty.style.cursor = 'default';
-      empty.style.opacity = '0.6';
-      empty.textContent = '< NO SAVED HISTORY >';
-      dropdown.appendChild(empty);
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'history-item amber-txt';
+      emptyEl.style.cursor = 'default';
+      emptyEl.style.opacity = '0.6';
+      emptyEl.textContent = '< NO SAVED HISTORY >';
+      dropdown.appendChild(emptyEl);
       return;
     }
 
     list.forEach(item => {
-      const el = document.createElement('div');
-      el.className = 'history-item amber-txt';
+      const itemEl = document.createElement('div');
+      itemEl.className = 'history-item amber-txt';
 
       const label = document.createElement('span');
       label.className = 'history-item-text term-font';
@@ -1979,8 +2015,8 @@
       del.title = 'Delete entry';
       del.innerHTML = useIcon('trash', 13, 13);
 
-      el.append(label, del);
-      el.onclick = (e) => {
+      itemEl.append(label, del);
+      itemEl.onclick = (e) => {
         if (e.target.closest('.history-item-del')) {
           e.stopPropagation();
           removeHistoryValue(key, item);
@@ -1990,7 +2026,7 @@
           dropdown.style.display = 'none';
         }
       };
-      dropdown.appendChild(el);
+      dropdown.appendChild(itemEl);
     });
   }
 
@@ -2018,7 +2054,7 @@
       serviceTier:     document.getElementById('field-serviceTier').value,
       model:           document.getElementById('field-model').value.trim(),
       visionModel:     document.getElementById('field-visionModel').value.trim(),
-      imageModel:      document.getElementById('field-imageModel').value.trim() || 'black-forest-labs/FLUX-2-klein-9b',
+      imageModel:      document.getElementById('field-imageModel').value.trim() || DEFAULT_CONFIG.imageModel,
       reasoningEffort: document.getElementById('field-reasoningEffort').value,
       imageResolution: document.getElementById('field-imageResolution').value,
       imageQuality:    document.getElementById('field-imageQuality').value,
@@ -2088,24 +2124,24 @@
     getHistory('model').forEach(m => { if (!list.includes(m)) list.push(m); });
 
     if (list.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'history-item term-font';
-      empty.style.cursor = 'default';
-      empty.style.opacity = '0.6';
-      empty.textContent = '< NO MODEL HISTORY >';
-      modelDropdown.appendChild(empty);
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'history-item term-font';
+      emptyEl.style.cursor = 'default';
+      emptyEl.style.opacity = '0.6';
+      emptyEl.textContent = '< NO MODEL HISTORY >';
+      modelDropdown.appendChild(emptyEl);
       return;
     }
 
     list.forEach(m => {
-      const el = document.createElement('div');
-      el.className = 'history-item term-font';
+      const itemEl = document.createElement('div');
+      itemEl.className = 'history-item term-font';
       const isCurrent = CONFIG && m === CONFIG.model;
-      if (isCurrent) el.classList.add('current');
+      if (isCurrent) itemEl.classList.add('current');
       /* Prompt taxonomy: the active selection is prefixed with '>'. */
-      el.textContent = (isCurrent ? '> ' : '  ') + m;
-      el.title = m;
-      el.onclick = (e) => {
+      itemEl.textContent = (isCurrent ? '> ' : '  ') + m;
+      itemEl.title = m;
+      itemEl.onclick = (e) => {
         e.stopPropagation();
         if (CONFIG && m !== CONFIG.model) {
           CONFIG.model = m;
@@ -2114,7 +2150,7 @@
         }
         modelDropdown.style.display = 'none';
       };
-      modelDropdown.appendChild(el);
+      modelDropdown.appendChild(itemEl);
     });
   }
 
@@ -2126,7 +2162,7 @@
     }
     populateModelDropdown();
     /* Anchor directly under the status bar (measured, not hardcoded). */
-    modelDropdown.style.top = statusbarEl.offsetHeight + 'px';
+    modelDropdown.style.top = statusbar.offsetHeight + 'px';
     modelDropdown.style.display = 'block';
   }
 
@@ -2215,8 +2251,14 @@
    * ==========================================================================
    */
   function autoGrow() {
+    /* The clamp bounds live in CSS (--input-min-h / --input-max-h), the
+     * single source of truth for the input box geometry; read them back
+     * from the computed style so the JS clamp can never drift from CSS. */
+    const style = getComputedStyle(promptInput);
+    const minH = parseFloat(style.minHeight);
+    const maxH = parseFloat(style.maxHeight);
     promptInput.style.height = 'auto';
-    promptInput.style.height = Math.max(86, Math.min(promptInput.scrollHeight, 240)) + 'px';
+    promptInput.style.height = Math.max(minH, Math.min(promptInput.scrollHeight, maxH)) + 'px';
     /* The textarea's height feeds into the input bar's natural height, so
      * re-apply the current hide amount against the (possibly new) natural
      * height to keep it consistent. */
@@ -2290,12 +2332,27 @@
   updateAppHeight();
 
   /**
-   * Blurs active input element and waits for visualViewport resize events to settle.
+   * Blurs the active input and waits for the soft-keyboard dismissal to
+   * settle: on touch devices the visualViewport resizes asynchronously once
+   * the keyboard closes, and the geometry-dependent work that follows
+   * (spacer sizing, message anchoring) must run against the settled
+   * viewport, not the keyboard-covered one. The wait is event-driven (the
+   * first resize wins) with a timeout fallback for the case where no
+   * keyboard was open, so no resize ever fires. Devices without a soft
+   * keyboard (fine pointer = desktop) skip the wait entirely: there is
+   * nothing to settle, and a blind sleep would only add latency to
+   * every send.
    */
   async function dismissKeyboard() {
     if (document.activeElement) document.activeElement.blur();
-    promptInput.blur();
-    await new Promise(r => setTimeout(r, 150));
+    if (window.visualViewport && window.matchMedia('(pointer: coarse)').matches) {
+      await new Promise(resolve => {
+        let settled = false;
+        const finish = () => { if (!settled) { settled = true; resolve(); } };
+        window.visualViewport.addEventListener('resize', finish, { once: true });
+        setTimeout(finish, 300); /* fallback: keyboard was never open */
+      });
+    }
     updateAppHeight();
     await new Promise(r => requestAnimationFrame(r));
   }
@@ -2313,21 +2370,22 @@
   }
 
   /**
-   * Aligns the top coordinate of the target assistant element flush with the container top.
+   * Aligns the top coordinate of the target assistant message element flush
+   * with the container top.
    */
-  function alignAssistantToTop(div) {
-    if (!div || !div.parentElement) return;
+  function alignAssistantToTop(msgEl) {
+    if (!msgEl || !msgEl.parentElement) return;
     if (scrollSpacer) scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
-    conversationWrap.scrollTop += (div.getBoundingClientRect().top - conversationWrap.getBoundingClientRect().top);
+    conversationWrap.scrollTop += (msgEl.getBoundingClientRect().top - conversationWrap.getBoundingClientRect().top);
   }
 
-  function scrollAssistantToTop(div) {
-    if (!div) return;
+  function scrollAssistantToTop(msgEl) {
+    if (!msgEl) return;
     isAutoScrolling = true;
     requestAnimationFrame(() => {
-      alignAssistantToTop(div);
+      alignAssistantToTop(msgEl);
       requestAnimationFrame(() => { 
-        alignAssistantToTop(div); 
+        alignAssistantToTop(msgEl); 
         setTimeout(() => { isAutoScrolling = false; }, 100); 
       });
     });
@@ -2350,13 +2408,25 @@
     removeScrollSpacer();
 
     const turnId = nextTurnId++;
-    const div = document.createElement('div');
-    div.className = 'message user term-font';
-    div.dataset.turnId = String(turnId);
-    div.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(displayText)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
-    div.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(editText, div, carriedParts);
-    conversationWrap.appendChild(div);
+    const msgEl = document.createElement('div');
+    msgEl.className = 'message user term-font';
+    msgEl.dataset.turnId = String(turnId);
+    msgEl.innerHTML = `<div class="user-content-wrap"><span class="user-prompt-prefix amber-txt">&gt;</span><span class="user-prompt-text amber-txt">${escapeHtml(displayText)}</span></div><button class="edit-prompt-btn" title="Edit prompt">${useIcon('edit', 14, 14)}</button>`;
+    msgEl.querySelector('.edit-prompt-btn').onclick = () => editLastPrompt(editText, msgEl, carriedParts);
+    conversationWrap.appendChild(msgEl);
     return turnId;
+  }
+
+  /* Every conversationHistory entry MUST carry its owning turn's id
+   * (edit/retry rollback filters BY TURN ID). All pushes are routed
+   * through this guard so a missing turnId fails loudly at creation --
+   * a live bug at the call site -- rather than as a silent history
+   * corruption mystery three turns later. */
+  function pushHistoryEntry(entry) {
+    if (typeof entry.turnId !== 'number') {
+      throw new Error('history entry missing turnId: ' + JSON.stringify(entry.role));
+    }
+    conversationHistory.push(entry);
   }
 
   /* Shared by editLastPrompt and retryTurn: rolls the conversation (DOM
@@ -2369,11 +2439,15 @@
    * after aborted textless turns; identity-based filtering is immune to
    * that. Also restores lastGeneratedImageUrl from the nearest surviving
    * image entry, so image chaining survives an edit/retry. */
-  function rollbackConversationToUserMessage(userDiv) {
-    let node = userDiv;
-    while (node) { const r = node; node = node.nextElementSibling; r.remove(); }
-    const targetTurnId = Number(userDiv.dataset.turnId);
+  function rollbackConversationToUserMessage(userEl) {
+    let nodeEl = userEl;
+    while (nodeEl) { const r = nodeEl; nodeEl = nodeEl.nextElementSibling; r.remove(); }
+    const targetTurnId = Number(userEl.dataset.turnId);
     if (!Number.isNaN(targetTurnId)) {
+      /* All entries carry a turnId (enforced by pushHistoryEntry); the
+       * `?? 0` is pure defense-in-depth and should never fire -- an
+       * untagged entry would be pinned to turn 0 and survive every
+       * rollback, i.e. silent corruption in the KEEP direction. */
       conversationHistory = conversationHistory.filter(e => (e.turnId ?? 0) < targetTurnId);
     }
     const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
@@ -2398,7 +2472,7 @@
    * handler so that editing the prompt later does NOT discard the
    * attachments the turn carried. `text` is the REAL prompt the user typed
    * (possibly '' for an attachment-only turn), not the display label. */
-  async function editLastPrompt(text, userMsgDiv, carriedParts = []) {
+  async function editLastPrompt(text, userEl, carriedParts = []) {
     /* EDIT DURING A LIVE TURN = "stop and edit". The old behavior bailed
      * out entirely while isProcessing was true which, combined with the
      * input bar being unreachable mid-stream, left the user with no way
@@ -2413,7 +2487,7 @@
       if (!settled) return;
     }
   
-    rollbackConversationToUserMessage(userMsgDiv);
+    rollbackConversationToUserMessage(userEl);
   
     /* The edited turn's attachments are carried over into the input bar as
      * ready-made payload parts (assignment, not concat: editing a different
@@ -2433,20 +2507,26 @@
     promptInput.value = text; autoGrow(); promptInput.focus();
   }
 
-  function createAssistantContainer() {
-    const div = document.createElement('div');
-    div.className = 'message assistant term-font';
+  /* Creates the assistant message element and MOUNTS it: appends it to the
+   * conversation, (re)adds the bottom scroll spacer, and anchors the new
+   * message flush against the top of the viewport. Returns the response
+   * element (the markdown container the answer streams into); the raw
+   * reasoning tail is its sibling '.thinking-scroll' div, hidden until the
+   * first reasoning delta arrives. */
+  function mountAssistantMessage() {
+    const msgEl = document.createElement('div');
+    msgEl.className = 'message assistant term-font';
     /* The response div keeps the placeholder "Thinking..." animation pinned
      * at the top; raw reasoning tokens stream into the sibling below it. The
      * sibling is hidden until the first reasoning delta arrives (models with
      * reasoningEffort "none", or non-reasoning models, never show it). */
-    div.innerHTML =
+    msgEl.innerHTML =
       `<div class="response markdown-body placeholder green-txt term-font">Thinking...</div>` +
       `<div class="thinking-scroll" style="display:none;"></div>`;
-    conversationWrap.appendChild(div);
+    conversationWrap.appendChild(msgEl);
     addScrollSpacer();
-    scrollAssistantToTop(div);
-    return div.querySelector('.response');
+    scrollAssistantToTop(msgEl);
+    return msgEl.querySelector('.response');
   }
 
   function setLoading(btnToStop) {
@@ -2474,14 +2554,14 @@
     promptInput.disabled = false; promptInput.value = ''; autoGrow();
   }
 
-  function addRetryButton(container, onRetry) {
-    container.parentElement.querySelector('.retry-btn')?.remove();
+  function addRetryButton(contentEl, onRetry) {
+    contentEl.parentElement.querySelector('.retry-btn')?.remove();
     const btn = document.createElement('button');
     btn.className = 'retry-btn term-font';
     btn.title = 'Retry';
     btn.innerHTML = useIcon('retry', 14, 14);
     btn.onclick = onRetry;
-    container.parentElement.appendChild(btn);
+    contentEl.parentElement.appendChild(btn);
   }
 
   /* ==========================================================================
@@ -2665,6 +2745,72 @@
     activeTts = { contentEl: null, controller: null, player: null };
   }
 
+  /* Case 1: the tapped message is already active -> pause/resume toggle,
+   * on the live PCM stream while still downloading, or on the cached
+   * audio after. */
+  function toggleTtsPlayback(contentEl) {
+    const entry = ttsAudioCache.get(contentEl);
+    if (activeTts.player) {
+      activeTts.player.paused ? activeTts.player.resume() : activeTts.player.pause();
+    } else if (entry?.audio) {
+      entry.audio.paused ? entry.audio.play() : entry.audio.pause();
+    }
+  }
+
+  /* Creates + unlocks the AudioContext and PCM stream player synchronously
+   * inside the click gesture (BEFORE any awaits, so autoplay policy never
+   * blocks the later async playback start). Wires the player's icon
+   * transitions to the tapped message. */
+  function startStreamingTts(contentEl) {
+    /* 24 kHz matches the PCM stream, so no resampling happens in the
+     * browser. */
+    const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
+    ctx.resume();
+    const player = createPcmStreamPlayer(ctx);
+    activeTts.player = player;
+
+    player.onplaying = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
+    player.onpaused  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
+    player.onended   = () => {
+      player.stop(); /* playback drained: close the AudioContext */
+      if (activeTts.contentEl === contentEl) {
+        activeTts = { contentEl: null, controller: null, player: null };
+        setSpeakIcon(contentEl, 'idle');
+      }
+    };
+    return player;
+  }
+
+  /* Consume the PCM body progressively: each network chunk becomes audible
+   * immediately while the server is still synthesizing the rest. On
+   * completion, wraps the PCM in a WAV header and returns the cache entry
+   * ({ audio, blobUrl }) so future taps replay for free. */
+  async function streamTtsAudio(res, player, contentEl) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      player.push(value);
+    }
+    player.finish();
+    if (!chunks.length) throw new Error('Speech synthesis returned no audio');
+
+    const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(chunks, TTS_PCM_RATE));
+    const audio = new Audio(blobUrl);
+    audio.onplay   = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
+    audio.onpause  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
+    audio.onended  = () => {
+      audio.currentTime = 0; /* so a re-tap replays from the start */
+      if (activeTts.contentEl === contentEl) {
+        activeTts = { contentEl: null, controller: null, player: null };
+        setSpeakIcon(contentEl, 'idle');
+      }
+    };
+    return { audio, blobUrl };
+  }
+
   /**
    * Speaker-icon tap handler. Three cases:
    *  1. This message is already active -> pause/resume toggle, on the live
@@ -2677,19 +2823,10 @@
    *     cached for free replays.
    */
   async function toggleSpeak(contentEl, rawMarkdown) {
-    if (!CONFIG || !contentEl) return;
-    if (!speakBtnOf(contentEl)) return;
+    if (!CONFIG || !contentEl || !speakBtnOf(contentEl)) return;
 
     /* Case 1: pause/resume toggle. */
-    if (activeTts.contentEl === contentEl) {
-      const entry = ttsAudioCache.get(contentEl);
-      if (activeTts.player) {
-        activeTts.player.paused ? activeTts.player.resume() : activeTts.player.pause();
-      } else if (entry?.audio) {
-        entry.audio.paused ? entry.audio.play() : entry.audio.pause();
-      }
-      return;
-    }
+    if (activeTts.contentEl === contentEl) return toggleTtsPlayback(contentEl);
 
     /* Starting a new message: whatever else was playing stops (its data
      * stays cached for later). */
@@ -2704,24 +2841,7 @@
       /* Case 3: full pipeline (only when no cached audio). */
       if (!entry?.blobUrl) {
         setSpeakIcon(contentEl, 'busy');
-
-        /* Create + unlock the AudioContext synchronously inside the click
-         * gesture, BEFORE any awaits, so autoplay policy never blocks the
-         * later (async) playback start. 24 kHz matches the PCM stream, so
-         * no resampling happens in the browser. */
-        const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
-        ctx.resume();
-        player = createPcmStreamPlayer(ctx);
-        activeTts.player = player;
-        player.onplaying = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
-        player.onpaused  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
-        player.onended   = () => {
-          player.stop(); /* playback drained: close the AudioContext */
-          if (activeTts.contentEl === contentEl) {
-            activeTts = { contentEl: null, controller: null, player: null };
-            setSpeakIcon(contentEl, 'idle');
-          }
-        };
+        player = startStreamingTts(contentEl);
 
         const spokenText = await prepareTtsText(rawMarkdown, controller.signal);
         const res = await apiFetch('v1/audio/speech', {
@@ -2736,31 +2856,7 @@
         if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Speech synthesis failed');
         if (!res.body) throw new Error('Audio streaming is not supported by this transport');
 
-        /* Consume the PCM body progressively: each network chunk becomes
-         * audible immediately; playback is already running while the
-         * server is still synthesizing the rest of the text. */
-        const reader = res.body.getReader();
-        const chunks = [];
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          player.push(value);
-        }
-        player.finish();
-        if (!chunks.length) throw new Error('Speech synthesis returned no audio');
-
-        /* Stream complete: wrap the PCM in a WAV header and cache it, so
-         * every future tap of this message replays for free (case 2). */
-        const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(chunks, TTS_PCM_RATE));
-        const audio = new Audio(blobUrl);
-        audio.onplay = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
-        audio.onpause = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
-        audio.onended = () => {
-          audio.currentTime = 0; /* so a re-tap replays from the start */
-          if (activeTts.contentEl === contentEl) { activeTts = { contentEl: null, controller: null, player: null }; setSpeakIcon(contentEl, 'idle'); }
-        };
-        entry = { audio, blobUrl };
+        entry = await streamTtsAudio(res, player, contentEl);
         ttsAudioCache.set(contentEl, entry);
         return; /* keep playing via the live stream; the cache is ready */
       }
@@ -2807,12 +2903,12 @@
    * attachment parts, so a subsequent EDIT of the retried turn keeps them
    * too (no falling through the cracks, edit after retry).
    */
-  async function retryTurn(assistantDiv, isImage, displayPrompt, fullPayload) {
+  async function retryTurn(assistantEl, isImage, displayPrompt, fullPayload) {
     if (isProcessing) return;
-    const userDiv = assistantDiv?.previousElementSibling;
-    if (!userDiv || !userDiv.classList.contains('user')) return;
+    const userEl = assistantEl?.previousElementSibling;
+    if (!userEl || !userEl.classList.contains('user')) return;
 
-    rollbackConversationToUserMessage(userDiv);
+    rollbackConversationToUserMessage(userEl);
 
     isProcessing = true;
     activeAbortController = new AbortController();
@@ -2825,9 +2921,9 @@
        * the input box. For image turns the prompt text IS the display
        * text (image mode never attaches files). */
       const turnId = createUserMessage(displayPrompt, isImage ? displayPrompt : promptTextFromPayload(fullPayload), extractAttachmentParts(fullPayload));
-      const newEl = createAssistantContainer();
-      if (isImage) await executeImageRequest(displayPrompt, newEl, activeAbortController.signal, turnId);
-      else await executePromptRequest(fullPayload, displayPrompt, newEl, activeAbortController.signal, turnId);
+      const newContentEl = mountAssistantMessage();
+      if (isImage) await executeImageRequest(displayPrompt, newContentEl, activeAbortController.signal, turnId);
+      else await executePromptRequest(fullPayload, displayPrompt, newContentEl, activeAbortController.signal, turnId);
     } finally {
       isProcessing = false;
       activeAbortController = null;
@@ -2860,7 +2956,7 @@
       /* The bubble shows the display label; the edit button carries the
        * REAL (possibly empty) prompt text, not the label. */
       const turnId = createUserMessage(displayPrompt, prompt, extractAttachmentParts(fullPayload));
-      await executePromptRequest(fullPayload, displayPrompt, createAssistantContainer(), activeAbortController.signal, turnId);
+      await executePromptRequest(fullPayload, displayPrompt, mountAssistantMessage(), activeAbortController.signal, turnId);
     } finally { 
       isProcessing = false; 
       activeAbortController = null;
@@ -2869,18 +2965,9 @@
 
   /* 
    * ==========================================================================
-   * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
-   * ==========================================================================
-   * Broken into single-purpose helpers; this function is only the
-   * orchestrator. TOOL BUDGET SEMANTICS: the budget is a quantity of
-   * remaining tool calls, captured ONCE by the turn-owning invocation and
-   * only ever decreased as calls are executed. A budget of 0 means "this
-   * round offers no tools" -- identically to a configured max of 0 -- so
-   * "exhausted" and "disabled" are one and the same state, handled by the
-   * same code path: the model simply has nothing to call and must answer
-   * from what it has. A settings change mid-turn can neither extend nor
-   * shrink a turn already in flight, because the value is captured once
-   * rather than re-read from CONFIG on every round.
+   * CHAT TURN MACHINERY
+   * Single-purpose helpers used by executePromptRequest, the orchestrator
+   * of the SSE streaming chat & function-call loop (below).
    * ==========================================================================
    */
 
@@ -2909,7 +2996,7 @@
    * a single timeline either chat or image generation, never both, and this
    * replay path only ever runs in chat-locked conversations. */
   function buildApiMessages(fullPayload, displayPrompt, turnId) {
-    conversationHistory.push({ role: 'user', content: fullPayload, displayPrompt, turnId });
+    pushHistoryEntry({ role: 'user', content: fullPayload, displayPrompt, turnId });
     const messages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt }];
     for (let i = 0; i < conversationHistory.length - 1; i++) {
       const item = conversationHistory[i];
@@ -2965,24 +3052,30 @@
   ];
 
   /* Tools are offered only while budget remains AND the Tavily key exists.
-   * toolBudget <= 0 (configured 0 or spent) yields an empty array, so the
-   * model has nothing to call and must produce a textual answer. */
+   * Returns null (the tools key is OMITTED from the payload entirely) rather
+   * than an empty array: several OpenAI-compatible providers reject
+   * `tools: []`, and omission unambiguously means "nothing to call this
+   * round". toolBudget <= 0 (configured 0 or spent) means the model has
+   * nothing to call and must produce a textual answer. */
   function toolsForBudget(toolBudget) {
-    return (!!CONFIG.tavilyApiKey && toolBudget > 0) ? TOOL_DEFINITIONS : [];
+    return (!!CONFIG.tavilyApiKey && toolBudget > 0) ? TOOL_DEFINITIONS : null;
   }
 
   /* Runs ONE SSE chat-completion round and returns the accumulated tool
-   * calls. The accumulated ANSWER TEXT is written into `state.text` live,
-   * as it streams, so the caller's abort path can finalize the turn with
-   * the partial text (the role the old function-scope fullText played).
-   * Throws a plain Error on HTTP failure and an AbortError on abort -- the
-   * caller owns both teardown paths. thinkText is LOCAL deliberately:
-   * each tool-loop round is a fresh invocation, so each round's reasoning
-   * phase starts clean and REPLACES the previous round's text in the
-   * visible tail. */
-  async function streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, state) {
+   * calls. The accumulated ANSWER TEXT is written into `live.text` live,
+   * as it streams: `live` is a caller-owned accumulator, passed in empty
+   * and mutated in place, so the caller's abort path can finalize the turn
+   * with the partial text (the role the old function-scope fullText
+   * played). Throws a plain Error on HTTP failure and an AbortError on
+   * abort -- the caller owns both teardown paths. thinkText is LOCAL
+   * deliberately: each tool-loop round is a fresh invocation, so each
+   * round's reasoning phase starts clean and REPLACES the previous
+   * round's text in the visible tail. */
+  async function streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, live) {
+    const tools = toolsForBudget(toolBudget);
     const payload = Object.assign(
-      { model: activeModel, messages: apiMessages, stream: true, tools: toolsForBudget(toolBudget) },
+      { model: activeModel, messages: apiMessages, stream: true },
+      tools ? { tools: tools } : {},
       (CONFIG.reasoningEffort && CONFIG.reasoningEffort !== 'none') ? { reasoning_effort: CONFIG.reasoningEffort } : {},
       (CONFIG.serviceTier === 'priority' || CONFIG.serviceTier === 'flex') ? { service_tier: CONFIG.serviceTier } : {},
       CONFIG.extraParams
@@ -3038,7 +3131,7 @@
               }
             }
             if (delta.content) {
-              if (!state.text) {
+              if (!live.text) {
                 /* First final-answer token: retire the thinking tail
                  * (display:none, NOT removal -- a later tool-loop round
                  * may stream reasoning again). The placeholder
@@ -3049,8 +3142,8 @@
                 contentEl.classList.remove('placeholder');
                 alignAssistantToTop(contentEl.parentElement);
               }
-              state.text += delta.content;
-              renderMarkdownThrottled(contentEl, state.text);
+              live.text += delta.content;
+              renderMarkdownThrottled(contentEl, live.text);
             }
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
@@ -3078,15 +3171,18 @@
     return Object.values(accToolCalls);
   }
 
-  /* A tool failure is a RESULT for the model, not a turn error: the hint
-   * steers it away from retrying the identical call in a loop. */
-  function toolErrorResult(message) {
+  /* A tool failure is a RESULT for the model, not a turn error. The error
+   * names the failing tool and the actual failure so the model can react
+   * sensibly; the hint steers it away from retrying the identical call in
+   * a loop. */
+  function toolErrorResult(toolName, message) {
+    const hint = 'This tool call failed. DO NOT retry the same call with the same arguments. ' +
+                 'Answer from what you already know, ' +
+                 'tell the user the requested information could not be retrieved, ' +
+                 'or try a different tool only if it will move things forward.';
     return JSON.stringify({
-      error: message,
-      hint: 'This tool call failed. DO NOT retry the same call with the same arguments. ' +
-            'Choose whether to answer from what you already know, ' +
-            'tell the user the Youtube transcript could not be retrieved, ' +
-            'or try a different tool only if it is going to move things forward.'
+      error: (toolName ? `The '${toolName}' tool call failed: ` : '') + message,
+      hint: hint
     });
   }
 
@@ -3113,10 +3209,10 @@
       }
       /* Unknown tool name: an explicit error result, so the model does
        * not sit waiting for a response that never comes. */
-      return toolErrorResult('Unknown tool: ' + tc.name);
+      return toolErrorResult(null, 'Unknown tool: ' + tc.name);
     } catch (err) {
       if (err.name === 'AbortError') throw err;
-      return toolErrorResult(err.message);
+      return toolErrorResult(tc.name, err.message);
     }
   }
 
@@ -3128,7 +3224,7 @@
     renderMarkdown(contentEl, fullText);
     addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
     addSpeakButton(contentEl, fullText);
-    conversationHistory.push({ role: 'assistant', content: fullText, turnId });
+    pushHistoryEntry({ role: 'assistant', content: fullText, turnId });
     resetInput();
   }
 
@@ -3136,7 +3232,7 @@
    * ==========================================================================
    * EXECUTE PROMPT REQUEST (SSE STREAMING CHAT & FUNCTION CALL LOOP)
    * ==========================================================================
-   * Entry point for a chat turn. Parameters: what the
+   * Entry point and orchestrator for a chat turn. Parameters: what the
    * user submitted (fullPayload), what the bubble shows (displayPrompt),
    * where the answer streams (contentEl), how to abort (signal), and which
    * turn this is (turnId, for edit/retry rollback).
@@ -3163,30 +3259,31 @@
     const apiMessages = buildApiMessages(fullPayload, displayPrompt, turnId);
     let toolBudget = getMaxTavilyCalls();
 
-    /* Written live by the stream so the abort path below can finalize the
-     * turn with the partial text. */
-    const state = { text: '' };
+    /* Live accumulator: the stream writes the answer text into it as
+     * tokens arrive, so the abort path below can finalize the turn with
+     * the partial text. */
+    const live = { text: '' };
 
     try {
       for (;;) {
-        const toolCalls = await streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, state);
+        const toolCalls = await streamChatCompletion(apiMessages, activeModel, toolBudget, contentEl, signal, live);
 
         /* No tool calls: the model produced its final answer. Turn over. */
         if (toolCalls.length === 0) {
-          completeAssistantTurn(contentEl, state.text, displayPrompt, fullPayload, turnId);
+          completeAssistantTurn(contentEl, live.text, displayPrompt, fullPayload, turnId);
           return;
         }
 
         /* Tool calls arrived on a round where NO tools were offered
          * (budget at 0, whether configured that way or spent by earlier
-         * calls -- a model emitting calls against an empty tools array).
+         * calls -- a model emitting calls against an omitted tools key).
          * No further API round is made: the pending calls are discarded
          * and the turn finishes with whatever text streamed. apiMessages
          * is turn-scoped and dies here, and conversationHistory only ever
          * stores final text content, so nothing dangles. */
         if (toolBudget <= 0) {
           completeAssistantTurn(contentEl,
-            state.text + '\n\n-- TOOL BUDGET EXHAUSTED; PENDING TOOL CALLS DISCARDED --',
+            live.text + '\n\n-- TOOL BUDGET EXHAUSTED; PENDING TOOL CALLS DISCARDED --',
             displayPrompt, fullPayload, turnId);
           return;
         }
@@ -3200,26 +3297,26 @@
          * round's thinking phase starts fresh in a clean local. */
         apiMessages.push({
           role: 'assistant',
-          content: state.text || null,
+          content: live.text || null,
           tool_calls: toolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments } }))
         });
         for (const tc of toolCalls) {
-          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: await executeToolCall(tc, contentEl, state.text, signal) });
+          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: await executeToolCall(tc, contentEl, live.text, signal) });
         }
         toolBudget = Math.max(0, toolBudget - toolCalls.length);
       }
     } catch (err) {
       /* Stop button: whatever streamed in survives as a partial turn. */
       if (err.name === 'AbortError') {
-        finalizeStoppedResponse(contentEl, state.text);
+        finalizeStoppedResponse(contentEl, live.text);
         addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
-        addSpeakButton(contentEl, state.text);
+        addSpeakButton(contentEl, live.text);
         /* Only partial content makes it into history; an empty abort
          * leaves the turn unrecorded (the retry button recreates it).
          * Either way the entry carries the turn's id, so rollback
          * filters it out correctly even though user/assistant entries
          * no longer strictly alternate. */
-        state.text && conversationHistory.push({ role: 'assistant', content: state.text, turnId });
+        if (live.text) pushHistoryEntry({ role: 'assistant', content: live.text, turnId });
         resetInput();
         return;
       }
@@ -3287,43 +3384,74 @@
     try {
       setLoading(sendImgBtn); await dismissKeyboard(); 
       const turnId = createUserMessage(prompt, prompt);
-      await executeImageRequest(prompt, createAssistantContainer(), activeAbortController.signal, turnId);
+      await executeImageRequest(prompt, mountAssistantMessage(), activeAbortController.signal, turnId);
     } finally { 
       isProcessing = false; 
       activeAbortController = null;
     }
   }
 
-  async function executeImageRequest(promptText, contentEl, signal, turnId = nextTurnId++) {
-    const targetModel = CONFIG.imageModel || 'black-forest-labs/FLUX-2-klein-9b';
+  async function executeImageRequest(promptText, contentEl, signal, turnId) {
+    /* DEFAULT_CONFIG is the single source of truth for image-generation
+     * defaults; the fallbacks below only cover a strangely partial CONFIG. */
+    const targetModel = CONFIG.imageModel || DEFAULT_CONFIG.imageModel;
     updateStatusBar(targetModel);
-    conversationHistory.push({ role: 'user', content: promptText, displayPrompt: promptText, turnId });
 
-    const payload = { model: targetModel, prompt: promptText, size: CONFIG.imageResolution || '1280x720', quality: CONFIG.imageQuality || 'standard', style: CONFIG.imageStyle || 'natural' };
+    /* One retry closure for every error/abort path below (image turns never
+     * attach files, hence the null payload). */
+    const onRetry = () => retryTurn(contentEl.parentElement, true, promptText, null);
+
+    pushHistoryEntry({ role: 'user', content: promptText, displayPrompt: promptText, turnId });
+
+    const payload = {
+      model: targetModel,
+      prompt: promptText,
+      size: CONFIG.imageResolution || DEFAULT_CONFIG.imageResolution,
+      quality: CONFIG.imageQuality || DEFAULT_CONFIG.imageQuality,
+      style: CONFIG.imageStyle || DEFAULT_CONFIG.imageStyle
+    };
     if (lastGeneratedImageUrl) payload.image = lastGeneratedImageUrl;
 
     try {
       const res = await apiFetch('v1/openai/images/generations', payload, signal);
       if (!res.ok) {
         const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
-        setError(contentEl, err); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput(); return;
+        setError(contentEl, err);
+        addRetryButton(contentEl, onRetry);
+        conversationHistory.pop();
+        resetInput();
+        return;
       }
 
       const data = await res.json();
-      const imageUrl = data?.data?.[0]?.url || (data?.data?.[0]?.b64_json ? `data:image/png;base64,${data.data[0].b64_json}` : null);
+      const b64 = data?.data?.[0]?.b64_json;
+      const imageUrl = data?.data?.[0]?.url || (b64 ? `data:image/png;base64,${b64}` : null);
       if (!imageUrl) throw new Error('No image returned');
 
-      contentEl.classList.remove('placeholder'); contentEl.innerHTML = '';
+      contentEl.classList.remove('placeholder');
+      contentEl.innerHTML = '';
       const imgEl = document.createElement('img');
-      imgEl.src = imageUrl; imgEl.className = 'img-thumbnail'; imgEl.alt = promptText;
+      imgEl.src = imageUrl;
+      imgEl.className = 'img-thumbnail';
+      imgEl.alt = promptText;
       imgEl.onclick = () => openLightbox(imageUrl);
-      contentEl.appendChild(imgEl); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null));
+      contentEl.appendChild(imgEl);
+      addRetryButton(contentEl, onRetry);
 
       lastGeneratedImageUrl = imageUrl;
-      conversationHistory.push({ role: 'assistant', type: 'image', url: imageUrl, turnId }); resetInput();
+      pushHistoryEntry({ role: 'assistant', type: 'image', url: imageUrl, turnId });
+      resetInput();
     } catch (err) {
-      if (err.name === 'AbortError') { finalizeStoppedResponse(contentEl, ''); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); resetInput(); return; }
-      setError(contentEl, err.message || 'Image request failed'); addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, true, promptText, null)); conversationHistory.pop(); resetInput();
+      if (err.name === 'AbortError') {
+        finalizeStoppedResponse(contentEl, '');
+        addRetryButton(contentEl, onRetry);
+        resetInput();
+        return;
+      }
+      setError(contentEl, err.message || 'Image request failed');
+      addRetryButton(contentEl, onRetry);
+      conversationHistory.pop();
+      resetInput();
     }
   }
 
