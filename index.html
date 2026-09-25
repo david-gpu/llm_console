@@ -1658,11 +1658,15 @@
     return `# System Baseline Configuration\n` +
            `Date: ${dateStr}\n` +
            `Time: ${timeStr}\n\n` +
+           `## Youtube\n` +
            `When summarizing a video, start right away with the substance, without ` +
            `introductions or boilerplate like the channel name, the view count, or 'In this video...'.\n` +
            `Write plain prose suited to be read aloud by a TTS engine, rather than bullet points. ` +
            `Omit advertisements, sponsored content and self-promotions. ` +
            `Include timestamps as links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n\n` +
+           `## Code blocks\n` +
+           `When providing fixes to code, do not post snippets with ` +
+           `ellipsis (...xyz unchanged from base...). Instead, provide the whole function.` +
            `# Available Tools\n` +
            `${toolLine}\n\n` +
            `# User's Instructions\n`;
@@ -1692,6 +1696,7 @@
    * a silently mangled transcript.
    * ==========================================================================
    */
+   
   const YT_SEGMENT_MERGE_GAP = 0.5;  /* s; segments closer than this are merged */
   const YT_LAST_LINE_SPAN = 5;       /* s; assumed span of the final caption line */
 
@@ -2829,29 +2834,44 @@
   /* ==========================================================================
    * READ-ALOUD (TTS) SUBSYSTEM — Qwen/Qwen3-TTS via DeepInfra
    * ==========================================================================
-   * Two-stage pipeline:
+   * Two-stage pipeline, overlapped so audio starts as early as possible
+   * (measured: ~1.9 s tap-to-first-sound, model-side floor):
    *   Stage 1 (LLM text prep): streams a rewrite of the raw markdown reply as
-   *   plain speakable prose. Paragraphs (two consecutive newlines) are fed to
-   *   stage 2 the moment they complete, so the first synthesis request ships
-   *   after the FIRST PARAGRAPH, not after the whole prep pass.
-   *   Stage 2 (synthesis): one POST per paragraph to v1/audio/speech,
-   *   requested as raw PCM (16-bit signed LE, mono, 24 kHz). Each response
-   *   body is consumed to COMPLETION (arrayBuffer), so every body is
-   *   sample-aligned by construction -- no chunk-stitching, no parity
-   *   carry-over, no streaming player state. Each decoded segment is
-   *   scheduled back-to-back on one AudioContext timeline; pause/resume is
-   *   ctx.suspend()/resume(), which freezes the timeline and preserves the
-   *   position with zero bookkeeping.
+   *   plain speakable prose. The FIRST segment ships early -- at the first
+   *   sentence boundary past TTS_FIRST_SEGMENT_CHARS, rather than waiting
+   *   for the (possibly enormous) opening paragraph. All later segments ship
+   *   at paragraph boundaries (two consecutive newlines), which is where a
+   *   spoken pause belongs.
+   *   Stage 2 (synthesis): one POST per segment to v1/audio/speech,
+   *   requested as raw PCM (16-bit signed LE, mono, 24 kHz), with
+   *   service_tier 'priority' on the FIRST segment only (click-to-sound
+   *   latency) and default afterwards (throughput; playback consumes audio
+   *   slower than the engine produces it). Each response body is consumed
+   *   as a STREAM: every whole-frame chunk is scheduled on the
+   *   AudioContext timeline the instant it arrives. Parity is per-body only
+   *   (a trailing odd byte is dropped -- half a sample, inaudible), so
+   *   bodies never weld into each other and the cached PCM stays
+   *   sample-aligned by construction.
    *
-   * FAILURE POLICY: each synthesis call gets ONE retry; a second consecutive
-   * failure stops requesting further segments but lets already-scheduled
-   * audio drain to its natural end, after which the error is reported on
-   * the message.
+   * PAUSES: the engine sees each segment as an independent request and
+   * cannot render the paragraph break between them, so a silence of
+   * TTS_PARAGRAPH_PAUSE is embedded in the PCM stream at every junction
+   * that begins a new paragraph (mid-paragraph cuts at sentence
+   * boundaries splice directly -- the sentence provides its own break).
+   * Silence embedded this way survives into the cached replay for free.
    *
-   * CACHING: the concatenated PCM of a fully successful session is cached
-   * per-message (WeakMap keyed by the response container, so it dies with
-   * the node on edit/retry). A re-tap replays it through the same scheduler
-   * with zero API traffic. Only complete sessions are cached.
+   * FAILURE POLICY: each synthesis call gets exactly ONE retry, and only
+   * when ZERO bytes of the segment were received -- a mid-body failure has
+   * audio already scheduled, so a retry would duplicate audible sound. A
+   * failure that propagates stops further segment requests but lets
+   * already-scheduled audio drain to its natural end, after which the
+   * error is reported on the message.
+   *
+   * CACHING: the PCM of a fully successful session (including the junction
+   * silences) is concatenated and cached per-message (WeakMap keyed by the
+   * response container, so it dies with the node on edit/retry). A re-tap
+   * replays it through the same scheduler with zero API traffic. Only
+   * complete sessions are cached.
    *
    * STATE MACHINE (the single source of truth for the speak button):
    *   idle --preparing--> preparing --first audio--> playing --drain--> idle
@@ -2864,6 +2884,29 @@
   const TTS_PCM_RATE = 24000;            /* PCM: 16-bit signed LE, mono */
   const TTS_SYNTH_SEGMENT_CHARS = 1500;  /* /v1/audio/speech input ceiling */
   const TTS_PREP_SEGMENT_CHARS  = 24000; /* bounds each stage-1 call's output */
+
+  /* Silence inserted at junctions that begin a new paragraph: the engine
+   * synthesizes each segment as an independent request and cannot see the
+   * paragraph break, so without this the last sentence of one segment is
+   * spliced directly onto the first of the next. Embedded in the PCM
+   * stream (not the scheduler timeline) so cached replays keep the pause. */
+  const TTS_PARAGRAPH_PAUSE = 0.45; /* seconds; typical spoken paragraph break */
+
+  function makeSilence(seconds) {
+    /* Zero-filled Int16 LE PCM is digital silence by definition. */
+    return new ArrayBuffer(Math.round(TTS_PCM_RATE * 2 * seconds));
+  }
+
+  /* First-segment early ship: while NO segment has been emitted yet, the
+   * sink cuts at the first sentence boundary once this many characters
+   * have accumulated -- it does not wait for the model to finish the
+   * (possibly enormous) opening paragraph. Measured over three runs, the
+   * opening paragraph was 1244-1332 chars and was the entire
+   * click-to-first-sound story; ~240 chars is 2-3 spoken sentences.
+   * After the first segment, paragraph granularity resumes: paragraphs
+   * match the engine's natural pause structure, and only the first
+   * segment's latency is user-perceptible. */
+  const TTS_FIRST_SEGMENT_CHARS = 240;
 
   /* Per-message audio cache: contentEl -> { pcm: ArrayBuffer } */
   const ttsAudioCache = new WeakMap();
@@ -2899,9 +2942,9 @@
     return buf;
   }
 
-  /* Gapless segment scheduler on one AudioContext. schedule() queues one
-   * completed PCM body; close() declares that no more segments will arrive
-   * and arms drain detection (onDrain fires when the last source ends, or
+  /* Gapless scheduler on one AudioContext. schedule() queues one PCM
+   * chunk; close() declares that no more chunks will arrive and arms
+   * drain detection (onDrain fires when the last source ends, or
    * immediately if none is live); stop() tears everything down without
    * firing onDrain. */
   function createPcmScheduler(ctx, onDrain) {
@@ -2923,16 +2966,28 @@
     };
   }
 
-  /* Prose sink: stage-1 deltas in, TTS-ready segments out. ONE segment is
-   * one paragraph (two consecutive newlines); a paragraph longer than
-   * maxLen is cut at sentence (then word) boundaries -- the safety valve
-   * for a model that emits one giant paragraph, without which first-sound
-   * latency would regress to barrier behaviour. end() flushes the tail.
-   * The batch chunker below is this same policy with a whole text pushed
-   * at once, so stage-1 input chunking and stage-2 feeding share ONE
-   * implementation of the boundary rules. */
-  function createProseSink(maxLen, onSegment) {
+  /* Prose sink: stage-1 deltas in, TTS-ready segments out, each carrying
+   * whether it STARTS A NEW PARAGRAPH (the pause logic needs this: a
+   * paragraph junction gets a spoken pause; a mid-paragraph cut at a
+   * sentence boundary must splice directly). Sources of emission, in
+   * order: the ceiling valve (buffer longer than maxLen, cut at
+   * sentence/word boundaries), the first-segment early ship (see
+   * TTS_FIRST_SEGMENT_CHARS, sentence boundary only), completed
+   * paragraphs (two consecutive newlines), and the end() flush.
+   * nextStartsPara tracks paragraph-start status across cuts: it is
+   * true at the message start and after every consumed blank line,
+   * and false after any cut that splits a paragraph. */
+  function createProseSink(maxLen, onSegment, firstMin = 0) {
     let buf = '';
+    let nextStartsPara = true;
+    let shippedAny = false;
+    const emit = (text) => {
+      const s = text.trim();
+      if (!s) return;
+      shippedAny = true;
+      onSegment(s, nextStartsPara);
+      nextStartsPara = false;
+    };
     const cutFrom = (window) => {
       for (let i = window.length - 1; i >= 0; i--) {
         if ('.!?\n。！？'.includes(window[i])) return i + 1;
@@ -2943,33 +2998,49 @@
     const drainOverhead = () => {
       while (buf.length > maxLen) {
         const cut = cutFrom(buf.slice(0, maxLen));
-        const s = buf.slice(0, cut).trim();
+        emit(buf.slice(0, cut));
         buf = buf.slice(cut);
-        if (s) onSegment(s);
       }
+    };
+    /* Latest sentence end at or beyond min chars: a terminator followed
+     * by whitespace. (A terminator at the very end of buf is NOT a cut
+     * candidate during streaming -- more deltas may extend the sentence;
+     * the end() flush catches any tail.) */
+    const sentenceEndAfter = (min) => {
+      for (let j = buf.length; j >= min; j--) {
+        if ('.!?。！？'.includes(buf[j - 1]) && /\s/.test(buf[j])) return j;
+      }
+      return -1;
     };
     return {
       push(delta) {
         buf += String(delta).replace(/\r\n/g, '\n');
         drainOverhead();
+        /* First-segment early ship: only before anything has shipped, and
+         * only at a real sentence boundary. */
+        if (firstMin && !shippedAny) {
+          const cut = sentenceEndAfter(firstMin);
+          if (cut > 0) { emit(buf.slice(0, cut)); buf = buf.slice(cut); }
+        }
         for (;;) {
           const i = buf.indexOf('\n\n');
           if (i === -1) break;
-          const para = buf.slice(0, i).trim();
+          emit(buf.slice(0, i));
           buf = buf.slice(i + 2);
-          if (para) onSegment(para);
+          nextStartsPara = true;
         }
       },
       end() {
         drainOverhead();
-        const t = buf.trim();
+        emit(buf);
         buf = '';
-        if (t) onSegment(t);
       }
     };
   }
 
-  /* Batch entry point (stage-1 input chunking): the same sink, fed whole. */
+  /* Batch entry point (stage-1 input chunking): the same sink, fed whole.
+   * Paragraph-start flags are irrelevant here (input chunking does not
+   * synthesize), so only the text is collected. */
   function segmentTextForTts(text, maxLen) {
     const out = [];
     const sink = createProseSink(maxLen, s => out.push(s));
@@ -2992,30 +3063,36 @@
       try {
         res = await apiFetch(CONFIG.apiPath, {
           model: CONFIG.model,
-          reasoning_effort: 'low',
-          service_tier: 'priority',
+          reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions instead of following them */
+          service_tier: 'priority', /* to reduce latency */
           stream: true,
           temperature: 0.1,
-          max_tokens: 16384,
+          max_tokens: 16384, /* explicit ceiling so the provider default cannot silently truncate */
           messages: [
             { role: 'system', content:
                 'Transform the given Markdown input ' +
                 'into plain prose that is perfectly suited to be read aloud by a TTS engine.\n' +
                 'Guidelines:\n' +
                 '1. Do not output any Markdown syntax, emojis, or unreadable symbols like bullet points.\n' +
-                '2. When you encounter a link, simply output the link text, ignoring URLs.\n' +
-                '3. Replace code blocks with a brief description of the contents.\n' +
-                '4. Transform tables into readable prose. Highlight the differences between cells.\n' +
-                '5. Preserve the original language and all substantive information.\n' +
-                '6. Output ONLY the text to be read aloud, without preambles or anything else.\n' +
-                '7. Separate paragraphs with a blank line.\n' +
-                '8. Do NOT truncate, shorten, summarize or skip ANY part of the input, ' +
+                '2. When you encounter a timestamp, such as (02:45), (2:45) or [02:45] -- whether bare ' +
+                'or as the text of a link, as in ([MM:SS](https://youtu.be/...)) -- remove it entirely, ' +
+                'including its surrounding parentheses or brackets. Timestamps are navigation aids for ' +
+                'reading; they are meaningless when spoken.\n' +
+                '3. When you encounter a link, simply output the link text, ignoring URLs.\n' +
+                '4. Replace code blocks with a brief description of the contents.\n' +
+                '5. Transform tables into readable prose. Highlight the differences between cells.\n' +
+                '6. Preserve the original language and all substantive information.\n' +
+                '7. Output ONLY the text to be read aloud, without preambles or anything else.\n' +
+                '8. Separate paragraphs with a blank line.\n' +
+                '9. Do NOT truncate, shorten, summarize or skip ANY part of the input, ' +
                 'no matter how long it is. The output must cover the entire input.' },
             { role: 'user', content: chunks[i] }
           ]
         }, signal);
       } catch (e) {
         if (e.name === 'AbortError') throw e;
+        /* fetch() threw before any HTTP response existed: network / CSP /
+         * DNS level failure, NOT a server-side rejection. */
         throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
       }
       if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
@@ -3037,6 +3114,8 @@
             if (!trimmed.startsWith('data:') || trimmed === 'data: [DONE]') continue;
             try {
               const delta = JSON.parse(trimmed.slice(5).trim())?.choices?.[0]?.delta;
+              /* Only final-answer content is prose; reasoning deltas are
+               * ignored, same as in streamChatCompletion. */
               if (delta?.content) onProseDelta(delta.content);
             } catch (e) {}
           }
@@ -3050,77 +3129,103 @@
     }
   }
 
-  /* Stage 2, ONE call: synthesize one segment and return its complete PCM
-   * body. service_tier: 'priority' only on the session's first segment
-   * (click-to-first-sound latency), default afterwards -- playback runs
-   * slower than the engine, so later segments need no priority. */
-  async function synthesizeSegmentOnce(text, tier, signal) {
-    const stage = 'TTS STAGE 2 (speech synthesis, model ' + TTS_MODEL_ID + '), segment (' + text.length + ' chars)';
-    let res;
+  /* Stage 2, STREAMING, every segment: consumes the PCM body progressively
+   * and schedules each whole-frame chunk the instant it arrives, so sound
+   * starts a few hundred ms after the request rather than after the full
+   * body. Parity is per-body only: a trailing odd byte is dropped (half a
+   * sample, 21 microseconds, inaudible) and can never weld onto the next
+   * body. RETRY POLICY: exactly one retry, and only when ZERO bytes of
+   * the segment were received -- a mid-body failure has audio already
+   * scheduled, so a retry would duplicate audible sound; the error then
+   * propagates and the drain policy plays out the bank before reporting.
+   * onChunk receives (pcmChunk, isBodyStart). */
+  async function synthesizeSegment(text, tier, segIndex, signal, onChunk) {
+    const stage = 'TTS STAGE 2 (speech synthesis, model ' + TTS_MODEL_ID + '), segment ' + segIndex + ' (' + text.length + ' chars)';
+    let received = 0;
+    const attempt = async () => {
+      let res;
+      try {
+        res = await apiFetch('v1/audio/speech', Object.assign({
+          model: TTS_MODEL_ID,
+          input: text,
+          voice: CONFIG.ttsVoice,
+          language: 'Auto',
+          instruct: CONFIG.ttsInstruct,
+          response_format: 'pcm'
+        }, tier ? { service_tier: tier } : {}), signal);
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
+      }
+      if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
+      const reader = res.body.getReader();
+      let pending = new Uint8Array(0);  /* THIS body's parity tail only */
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || signal.aborted) break;
+        const all = new Uint8Array(pending.length + value.byteLength);
+        all.set(pending); all.set(value, pending.length);
+        const even = all.length & ~1;
+        const usable = all.subarray(0, even);
+        pending = all.slice(even);
+        if (usable.length) {
+          const firstChunk = received === 0;
+          received += usable.length;
+          onChunk(usable.buffer.slice(usable.byteOffset, usable.byteOffset + usable.length), firstChunk);
+        }
+      }
+      if (signal.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; throw e; }
+      if (!received) throw new Error(stage + ' failed: the server returned an empty audio body');
+    };
     try {
-      res = await apiFetch('v1/audio/speech', Object.assign({
-        model: TTS_MODEL_ID,
-        input: text,
-        voice: CONFIG.ttsVoice,
-        language: 'Auto',
-        instruct: CONFIG.ttsInstruct,
-        response_format: 'pcm'
-      }, tier ? { service_tier: tier } : {}), signal);
+      await attempt();
     } catch (e) {
-      if (e.name === 'AbortError') throw e;
-      throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
-    }
-    if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
-    let pcm = await res.arrayBuffer();
-    if (!pcm.byteLength) throw new Error(stage + ' failed: the server returned an empty audio body');
-    /* Defensive only: a body should always be whole-sample aligned; a stray
-     * trailing byte is a server bug worth a console line, nothing more. */
-    if (pcm.byteLength & 1) {
-      console.warn(stage + ': odd-length PCM body, dropping final byte');
-      pcm = pcm.slice(0, pcm.byteLength - 1);
-    }
-    return pcm;
-  }
-
-  /* Retry-once wrapper: transient hiccups get a second chance; a second
-   * consecutive failure propagates (the caller then drains + reports). */
-  async function synthesizeSegment(text, tier, signal) {
-    try { return await synthesizeSegmentOnce(text, tier, signal); }
-    catch (e) {
-      if (e.name === 'AbortError') throw e;
-      return await synthesizeSegmentOnce(text, tier, signal);
+      if (e.name === 'AbortError' || received > 0) throw e;
+      await attempt(); /* nothing audible yet: one retry; second failure propagates */
     }
   }
 
-  /* THE PIPELINE. Two concurrent lanes, no barrier:
+  /* THE PIPELINE. Two concurrent lanes over an ordered queue:
    *   - prep lane: streamTtsPrepText streams prose deltas into the prose
-   *     sink; each completed paragraph becomes a queue entry.
+   *     sink; each completed segment (with its startsPara flag) is
+   *     enqueued the moment it is cut.
    *   - synth lane: a FIFO worker, one segment at a time (never parallel:
-   *     segment order must match scheduling order), each completed PCM body
-   *     handed to onSegmentPcm the instant it lands.
-   * The one-slot wake gate is safe by single-threadedness: the worker
-   * re-checks queue/prepDone before suspending. Error precedence: a real
-   * error from either lane aborts the other (whose teardown surfaces as a
-   * deliberately unreported AbortError) and is rethrown; a genuine
-   * AbortError (user cancel / target switch) propagates silently. */
+   *     segment order must match scheduling order), streaming each body's
+   *     PCM chunks to the consumer as they arrive.
+   * There is NO barrier between the stages: the first synthesis request
+   * leaves as soon as the early-ship cut fires, while stage 1 is still
+   * generating. The one-slot wake gate is safe by single-threadedness:
+   * the worker always re-checks the queue/prepDone before suspending.
+   * Error precedence: the first lane to fail with a real (non-abort)
+   * error aborts the other, whose teardown surfaces as an AbortError that
+   * is deliberately NOT reported -- a mid-pipeline user cancel stays
+   * silent, and a real failure is never masked by the abort it causes. */
   async function runTtsPipeline(rawMarkdown, controller, onSegmentPcm) {
+    /* Queue of { text, startsPara }: startsPara tells the pause logic
+     * whether this segment begins a new paragraph (pause) or continues
+     * one (splice: the cut was at a sentence boundary, which already
+     * provides the break). */
     const queue = [];
-    let prepDone = false, wake = null, first = true;
+    let prepDone = false, wake = null, first = true, segIndex = 0;
     const wakeAll = () => { if (wake) { const w = wake; wake = null; w(); } };
 
     const synthLane = (async () => {
       for (;;) {
         while (queue.length === 0 && !prepDone) await new Promise(r => { wake = r; });
         if (queue.length === 0) return;
-        const text = queue.shift();
+        const item = queue.shift();
+        segIndex++;
         const tier = first ? 'priority' : '';
-        const pcm = await synthesizeSegment(text, tier, controller.signal);
         first = false;
-        onSegmentPcm(pcm);
+        await synthesizeSegment(item.text, tier, segIndex, controller.signal,
+          (pcm, isBodyStart) => onSegmentPcm(pcm, isBodyStart, item.startsPara));
       }
     })();
 
-    const sink = createProseSink(TTS_SYNTH_SEGMENT_CHARS, s => { queue.push(s); wakeAll(); });
+    const sink = createProseSink(TTS_SYNTH_SEGMENT_CHARS, (s, startsPara) => {
+      queue.push({ text: s, startsPara });
+      wakeAll();
+    }, TTS_FIRST_SEGMENT_CHARS);
     try {
       await streamTtsPrepText(rawMarkdown, controller.signal, d => sink.push(d));
       sink.end();
@@ -3191,9 +3296,9 @@
 
   /* Start the full pipeline on an uncached message. The AudioContext is
    * created synchronously inside the click gesture (before any await), so
-   * autoplay policy never blocks playback. On a real failure the pipeline
-   * has already stopped requesting segments; already-scheduled audio
-   * drains and ttsDrained reports the error. */
+   * autoplay policy never blocks playback. The PCM callback embeds the
+   * junction pause for every body that begins a new paragraph (never
+   * before the very first audio), then schedules the chunk. */
   async function ttsStart(contentEl, rawMarkdown) {
     const controller = new AbortController();
     const ctx = new AudioContext({ sampleRate: TTS_PCM_RATE });
@@ -3202,10 +3307,18 @@
     TTS = { state: 'preparing', contentEl, controller, ctx, scheduler, pcm: [], error: null };
     setSpeakIcon(contentEl, 'busy');
     try {
-      await runTtsPipeline(rawMarkdown, controller, (pcm) => {
+      await runTtsPipeline(rawMarkdown, controller, (pcm, isBodyStart, startsPara) => {
+        if (isBodyStart && TTS.pcm.length > 0 && startsPara) {
+          const gap = makeSilence(TTS_PARAGRAPH_PAUSE);
+          TTS.pcm.push(gap);
+          scheduler.schedule(gap);
+        }
         TTS.pcm.push(pcm);
         scheduler.schedule(pcm);
-        if (TTS.state === 'preparing') { TTS.state = 'playing'; setSpeakIcon(contentEl, 'playing'); }
+        if (TTS.state === 'preparing') {
+          TTS.state = 'playing';
+          setSpeakIcon(contentEl, 'playing');
+        }
       });
       scheduler.close(); /* arm drain; state is 'playing' until the last source ends */
     } catch (err) {
