@@ -1502,6 +1502,34 @@
   }
 
   /**
+   * Shared HTTP-failure diagnostic for user-facing error messages. Replaces
+   * the old anonymous `res.statusText || '... failed'` pattern, under which
+   * an HTTP 400 reached the screen as a bare "Bad Request" with no hint of
+   * WHICH call failed, let alone why. Surfaces (1) the numeric status,
+   * (2) the status text, and (3) the server's own error text -- parsed out
+   * of a JSON error envelope when present, raw body otherwise -- bounded
+   * so a verbose HTML error page cannot flood the console screen.
+   */
+  async function httpErrorDetail(res) {
+    let detail = '';
+    try {
+      const raw = await res.text();
+      try {
+        const parsed = JSON.parse(raw);
+        detail = parsed?.error?.message || parsed?.detail || parsed?.message || raw;
+      } catch (e) {
+        detail = raw; /* plain-text (or non-JSON) error body */
+      }
+    } catch (e) {
+      /* body unreadable: the status line below is still reported */
+    }
+    detail = String(detail || '').trim();
+    if (detail.length > 300) detail = detail.slice(0, 300) + ' [...]';
+    return `HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}` +
+           (detail ? `: ${detail}` : ' (no response body)');
+  }
+
+  /**
    * Renders or removes the empty ASCII splash state based on message count.
    */
   function checkEmptyState() {
@@ -2594,8 +2622,23 @@
    * ==========================================================================
    */
   const TTS_MODEL_ID = 'Qwen/Qwen3-TTS';
-  const TTS_MAX_CHARS = 16000; /* hardcoded cost guardrail */
   const TTS_PCM_RATE = 24000;  /* Qwen3-TTS PCM: 16-bit signed LE, mono */
+  /* These two constants are the
+   * per-request ceilings IMPOSED BY THE PROVIDERS, not feature limits of
+   * this app -- both are worked around by SEGMENTATION, never by the old
+   * TTS_MAX_CHARS silent truncation (which quietly chopped long replies
+   * mid-sentence and produced mystery-short readings):
+   *   TTS_SYNTH_SEGMENT_CHARS: /v1/audio/speech rejects oversized `input`
+   *     with an opaque HTTP 400; longer prose is cut at sentence
+   *     boundaries and synthesized in sequential requests whose audio is
+   *     scheduled back-to-back on one continuous timeline.
+   *   TTS_PREP_SEGMENT_CHARS: bounds each stage-1 LLM call so its OUTPUT
+   *     always fits inside a single response (a single giant call was
+   *     silently truncated by the provider's default output cap, cutting
+   *     the tail of the prepared speech). The per-chunk prose outputs are
+   *     concatenated afterwards. */
+  const TTS_SYNTH_SEGMENT_CHARS = 1500;
+  const TTS_PREP_SEGMENT_CHARS  = 24000;
 
   /* Per-message audio cache: contentEl -> { audio, blobUrl }. WeakMap so it
    * dies with the DOM node when a turn is edited/retried away. */
@@ -2616,7 +2659,87 @@
     btn.classList.toggle('busy', mode === 'busy');
     btn.classList.toggle('playing', mode === 'playing');
     btn.innerHTML = (mode === 'playing') ? useIcon('stop', 14, 14) : useIcon('speech', 14, 14);
-    btn.title = (mode === 'playing') ? 'Pause speech' : 'Read aloud';
+    /* The busy tooltip stays deliberately STATIC (no per-stage/per-chunk
+     * telemetry: verbosity is reserved for actual errors): the only thing
+     * the user ever needs to know while blinking is that it can be
+     * cancelled. */
+    btn.title = (mode === 'busy') ? 'Preparing — tap to cancel'
+              : (mode === 'playing') ? 'Pause speech'
+              : 'Read aloud';
+  }
+
+  /**
+   * Splits text into speakable segments, each no longer than maxLen,
+   * cutting only at sentence boundaries (falling back to word, then
+   * character boundaries for pathological unbroken runs such as long
+   * URLs). Delimiters stay attached to the sentence they terminate so the
+   * TTS engine hears natural pauses. NEVER truncates: every input
+   * character ends up in exactly one segment.
+   */
+  function segmentTextForTts(text, maxLen) {
+    const out = [];
+    let current = '';
+    const flush = () => { if (current.trim()) out.push(current.trim()); current = ''; };
+    const sentences = text.match(/[^.!?\n。！？]+[.!?\n。！？]+|[^.!?\n。！？]+$/g) || [];
+    for (const s of sentences) {
+      if (s.length <= maxLen) {
+        if (current.length + s.length > maxLen) flush();
+        current += s;
+      } else {
+        /* Single sentence longer than the ceiling: split on word
+         * boundaries where possible, hard-cut otherwise. */
+        flush();
+        let rest = s;
+        while (rest.length > maxLen) {
+          const slice = rest.slice(0, maxLen);
+          const cut = Math.max(slice.lastIndexOf(' '), slice.lastIndexOf(','), slice.lastIndexOf(';'));
+          const at = cut > maxLen * 0.5 ? cut + 1 : maxLen;
+          out.push(rest.slice(0, at).trim());
+          rest = rest.slice(at);
+        }
+        current = rest;
+      }
+    }
+    flush();
+    return out;
+  }
+
+  /**
+   * Incremental sibling of segmentTextForTts: fed prose DELTAS as they
+   * stream out of stage 1, it returns segments as soon as each one has
+   * accumulated to the provider ceiling, cut at sentence (then word)
+   * boundaries. This is what lets synthesis start while stage 1 is still
+   * generating: the first TTS request ships once ~maxLen prose chars
+   * exist, not after the entire prep pass finishes. Segments smaller than
+   * 30% of the ceiling are deliberately held back (a tiny leading sentence
+   * is merged into the next one) so early deltas don't spawn
+   * micro-segments and a burst of tiny billable TTS calls.
+   */
+  function createTtsSegmenter(maxLen) {
+    let buf = '';
+    return {
+      push(delta) {
+        buf += delta;
+        const ready = [];
+        while (buf.length >= maxLen) {
+          const window = buf.slice(0, maxLen);
+          let cut = -1;
+          for (let i = window.length - 1; i >= Math.floor(maxLen * 0.3); i--) {
+            if ('.!?\n。！？'.includes(window[i])) { cut = i + 1; break; }
+          }
+          if (cut < 0) cut = Math.max(window.lastIndexOf(' '), window.lastIndexOf(','), window.lastIndexOf(';')) + 1;
+          if (cut <= 0) cut = maxLen;
+          ready.push(window.slice(0, cut).trim());
+          buf = buf.slice(cut);
+        }
+        return ready;
+      },
+      flush() {
+        const tail = buf.trim();
+        buf = '';
+        return tail ? [tail] : [];
+      }
+    };
   }
 
   /**
@@ -2656,7 +2779,7 @@
   function createPcmStreamPlayer(ctx) {
     let nextTime = 0;        /* timeline position for the next chunk       */
     let tail = new Uint8Array(0); /* bytes of a split 16-bit sample       */
-    let lastNode = null, finished = false, stopped = false, started = false;
+    let lastNode = null, lastNodeEnded = false, finished = false, stopped = false, started = false;
     const player = {
       paused: false,
       onplaying: null, onpaused: null, onended: null,
@@ -2682,12 +2805,25 @@
         nextTime = startAt + buf.duration;
         src.connect(ctx.destination);
         lastNode = src;
+        lastNodeEnded = false;
         src.onended = () => {
+          if (src === lastNode) lastNodeEnded = true;
           if (finished && !stopped && src === lastNode) player.onended?.();
         };
         if (!started && !player.paused) { started = true; player.onplaying?.(); }
       },
-      finish() { finished = true; if (!lastNode && !stopped) player.onended?.(); },
+      /* finish() may now be called long after the last scheduled node has
+       * already drained (multi-segment synthesis: the final HTTP body can
+       * complete after the last audio chunk stopped playing, or be empty
+       * while earlier segments already made sound). The old version only
+       * fired onended when finish() ran BEFORE any node existed, so a
+       * finish()-after-drain left the button stuck in the playing state
+       * forever. lastNodeEnded remembers the drain so finish() fires the
+       * terminal callback either way. */
+      finish() {
+        finished = true;
+        if ((lastNodeEnded || !lastNode) && !stopped) player.onended?.();
+      },
       pause()  { if (!stopped) { player.paused = true;  ctx.suspend(); player.onpaused?.();  } },
       resume() { if (!stopped) { player.paused = false; ctx.resume();  player.onplaying?.(); } },
       stop()   { if (!stopped) { stopped = true; try { ctx.close(); } catch {} } }
@@ -2696,37 +2832,84 @@
   }
 
   /**
-   * Stage 1: asks the configured chat model to rewrite the raw markdown
-   * reply as plain speakable text. (Unchanged from the buffered version.)
+   * Stage 1, STREAMING: asks the configured chat model to rewrite the raw
+   * markdown reply as plain speakable prose, and hands each prose delta
+   * to onProseDelta the moment it arrives -- the consumer (runTtsPipeline)
+   * starts TTS synthesis from the first ready segment while this pass is
+   * still generating. No input limit: the raw markdown is chunked only so
+   * each response's OUTPUT fits its token budget, and the model is told
+   * never to shorten anything. Every failure carries the stage label,
+   * model name, chunk index/size and full HTTP detail.
    */
-  async function prepareTtsText(rawMarkdown, signal) {
-    const res = await apiFetch(CONFIG.apiPath, {
-      model: CONFIG.model,
-      reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions, instead of following them */
-      service_tier: 'priority', /* To reduce latency */
-      stream: false,
-      temperature: 0.1,
-      messages: [
-        { role: 'system', content:
-            'Transform the given Markdown input ' +
-            'into plain prose that is perfectly suited to be read aloud by a TTS engine.\n' +
-            'Guidelines:\n' +
-            '1. Do not output any Markdown syntax, emojis, or unreadable symbols like bullet points.\n' +
-            '2. When you encounter a link, simply output the link text, ignoring URLs.\n' +
-            '3. Replace code blocks with a brief description of the contents.\n' +
-            '4. Transform tables into readable prose. Highlight the differences between cells.\n' +
-            '5. Preserve the original language and all substantive information.\n' +
-            '6. Output ONLY the text to be read aloud, without preambles or anything else.' },
-        { role: 'user', content: rawMarkdown }
-      ]
-    }, signal);
-    if (!res.ok) {
-      const msg = (await res.json().catch(() => null))?.error?.message;
-      throw new Error(msg || res.statusText || 'Text preparation failed');
+  async function streamTtsPrepText(rawMarkdown, signal, onProseDelta) {
+    const chunks = segmentTextForTts(rawMarkdown, TTS_PREP_SEGMENT_CHARS);
+    for (let i = 0; i < chunks.length; i++) {
+      const stage = 'TTS STAGE 1 (markdown-to-prose, model ' + CONFIG.model + ')' +
+        (chunks.length > 1 ? ', chunk ' + (i + 1) + '/' + chunks.length + ' (' + chunks[i].length + ' chars in)' : '');
+      let res;
+      try {
+        res = await apiFetch(CONFIG.apiPath, {
+          model: CONFIG.model,
+          reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions, instead of following them */
+          service_tier: 'priority', /* To reduce latency */
+          stream: true, /* THE PIPELINE CHANGE: prose flows out per-token, feeding synthesis below */
+          temperature: 0.1,
+          max_tokens: 16384, /* explicit ceiling so the provider default cannot silently truncate */
+          messages: [
+            { role: 'system', content:
+                'Transform the given Markdown input ' +
+                'into plain prose that is perfectly suited to be read aloud by a TTS engine.\n' +
+                'Guidelines:\n' +
+                '1. Do not output any Markdown syntax, emojis, or unreadable symbols like bullet points.\n' +
+                '2. When you encounter a link, simply output the link text, ignoring URLs.\n' +
+                '3. Replace code blocks with a brief description of the contents.\n' +
+                '4. Transform tables into readable prose. Highlight the differences between cells.\n' +
+                '5. Preserve the original language and all substantive information.\n' +
+                '6. Output ONLY the text to be read aloud, without preambles or anything else.\n' +
+                '7. Do NOT truncate, shorten, summarize or skip ANY part of the input, ' +
+                'no matter how long it is. The output must cover the entire input.' },
+            { role: 'user', content: chunks[i] }
+          ]
+        }, signal);
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        /* fetch() threw before any HTTP response existed: network / CSP /
+         * DNS level failure, NOT a server-side rejection. */
+        throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
+      }
+      if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
+      if (!res.body) throw new Error(stage + ' failed: the transport did not expose a streaming response body');
+
+      const reader = res.body.getReader(), decoder = new TextDecoder();
+      let buffer = '', anyContent = false;
+      const abortStream = () => { try { reader.cancel(); } catch (e) {} };
+      signal.addEventListener('abort', abortStream);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || signal.aborted) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:') || trimmed === 'data: [DONE]') continue;
+            try {
+              const delta = JSON.parse(trimmed.slice(5).trim())?.choices?.[0]?.delta;
+              /* Only final-answer content is prose; reasoning deltas are
+               * ignored, same as in streamChatCompletion. */
+              if (delta?.content) { anyContent = true; onProseDelta(delta.content); }
+            } catch (e) {}
+          }
+        }
+      } finally {
+        signal.removeEventListener('abort', abortStream);
+      }
+      if (signal.aborted) {
+        const e = new Error('Aborted'); e.name = 'AbortError'; throw e;
+      }
+      if (!anyContent) throw new Error(stage + ' failed: the model returned no content');
     }
-    const out = ((await res.json())?.choices?.[0]?.message?.content || '').trim();
-    if (!out) throw new Error('Text preparation returned no content');
-    return out;
   }
 
   /**
@@ -2781,23 +2964,88 @@
     return player;
   }
 
-  /* Consume the PCM body progressively: each network chunk becomes audible
-   * immediately while the server is still synthesizing the rest. On
-   * completion, wraps the PCM in a WAV header and returns the cache entry
-   * ({ audio, blobUrl }) so future taps replay for free. */
-  async function streamTtsAudio(res, player, contentEl) {
+  /**
+   * Stage 2 streaming core for ONE segment: consumes the PCM body
+   * progressively, making each network chunk audible immediately while
+   * the server is still synthesizing, and returns the raw chunks so the
+   * caller can assemble the whole-session WAV afterwards. Does NOT call
+   * player.finish(): with multi-segment synthesis the session only ends
+   * after the LAST segment's body completes (see runTtsPipeline).
+   *
+   * BYTE PARITY IS TRACKED PER RESPONSE BODY, never across bodies. Each
+   * /v1/audio/speech response is an independent synthesis that starts on
+   * a sample boundary; the old player-level carry-over assumed one
+   * continuous stream (true in the single-request era), so a body ending
+   * on an odd byte would weld its stray low byte onto the NEXT segment's
+   * first byte, shifting every later sample by one byte -- i.e. harsh
+   * static for the rest of the message after a clean first segment. A
+   * stray final byte of a body can never be legitimately completed by
+   * the next body, so it is dropped (half a sample = 21 microseconds,
+   * inaudible) and reported to the console for field diagnosis.
+   */
+  async function pumpTtsPcmBody(res, player, onStrayByte) {
     const reader = res.body.getReader();
     const chunks = [];
+    let pending = new Uint8Array(0); /* odd-byte remainder of THIS body only */
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value);
-      player.push(value);
+      /* Merge with this body's own parity remainder, keep whole 16-bit frames. */
+      const all = new Uint8Array(pending.length + value.byteLength);
+      all.set(pending); all.set(value, pending.length);
+      const even = all.length & ~1;
+      const usable = all.subarray(0, even);
+      pending = all.slice(even);
+      if (usable.length) { chunks.push(usable); player.push(usable); }
     }
-    player.finish();
-    if (!chunks.length) throw new Error('Speech synthesis returned no audio');
+    if (pending.length && onStrayByte) onStrayByte(pending.length);
+    return chunks;
+  }
 
-    const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(chunks, TTS_PCM_RATE));
+  async function synthesizeTtsSegment(text, segIndex, player, signal, allChunks) {
+    const stage = 'TTS STAGE 2 (speech synthesis, model ' + TTS_MODEL_ID + '), segment ' + segIndex + ' (' + text.length + ' chars)';
+    let res;
+    try {
+      res = await apiFetch('v1/audio/speech', {
+        model: TTS_MODEL_ID,
+        input: text,
+        voice: CONFIG.ttsVoice,
+        language: 'Auto',
+        instruct: CONFIG.ttsInstruct,
+        response_format: 'pcm', /* raw 16-bit LE mono @ 24 kHz: streams */
+        service_tier: 'priority' /* to reduce latency */
+      }, signal);
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      throw new Error(stage + ' failed to reach the server: ' + (e.message || e));
+    }
+    if (!res.ok) throw new Error(stage + ' failed: ' + await httpErrorDetail(res));
+    if (!res.body) throw new Error(stage + ' failed: the transport did not expose a streaming response body');
+    let chunks;
+    try {
+      chunks = await pumpTtsPcmBody(res, player, (n) => {
+        /* Field diagnostic, deliberately console-only: a UI error for a
+         * dropped half-sample would be noise, but this line confirms (or
+         * rules out) the cross-body parity theory on real hardware. */
+        console.warn(stage + ': dropped ' + n + ' stray byte(s) at body end to preserve sample alignment');
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      throw new Error(stage + ' failed while streaming audio: ' + (e.message || e));
+    }
+    if (!chunks.length) throw new Error(stage + ' failed: the server returned an empty audio body');
+    /* chunks are already whole-frame-aligned per body, so the whole-session
+     * WAV cache inherits the fix: no byte drift across segment joins. */
+    allChunks.push(...chunks);
+  }
+
+  /**
+   * Assembles the finished-session cache entry from ALL accumulated PCM
+   * chunks (every segment concatenated), so a re-tap replays the ENTIRE
+   * message for free, exactly as before segmentation existed.
+   */
+  function buildTtsCacheEntry(allChunks, contentEl) {
+    const blobUrl = URL.createObjectURL(pcmChunksToWavBlob(allChunks, TTS_PCM_RATE));
     const audio = new Audio(blobUrl);
     audio.onplay   = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'playing'); };
     audio.onpause  = () => { if (activeTts.contentEl === contentEl) setSpeakIcon(contentEl, 'idle'); };
@@ -2809,6 +3057,76 @@
       }
     };
     return { audio, blobUrl };
+  }
+
+  /**
+   * THE PIPELINE. Two concurrent lanes over an ordered work queue:
+   *   - prep lane: streamTtsPrepText streams prose deltas out of stage 1,
+   *     feeds them to an incremental segmenter, and enqueues ready
+   *     TTS segments.
+   *   - synth lane: a FIFO worker that synthesizes each segment and pumps
+   *     its PCM into the player as it arrives.
+   * There is NO barrier between the stages: the first synthesis request
+   * leaves as soon as the first ~TTS_SYNTH_SEGMENT_CHARS of prose exist,
+   * while stage 1 is still generating. Error precedence: the first lane
+   * to fail with a real (non-abort) error records it in `failure` and
+   * aborts the other lane, whose teardown surfaces as an AbortError that
+   * is deliberately NOT reported -- so a mid-pipeline user cancel stays
+   * silent, and a real failure is never masked by the abort it causes.
+   * Returns all accumulated raw PCM chunks (for the session WAV cache).
+   */
+  async function runTtsPipeline(rawMarkdown, controller, player) {
+    const seg = createTtsSegmenter(TTS_SYNTH_SEGMENT_CHARS);
+    const queue = [];
+    let prepDone = false;
+    /* One-slot wake gate. Safe by single-threadedness: the worker always
+     * re-checks the queue/prepDone before suspending, and the producer
+     * only runs while the worker is suspended, so a notify with no waiter
+     * is always followed by a live-state re-check. */
+    let gateResolve = null;
+    const wake = () => { if (gateResolve) { const r = gateResolve; gateResolve = null; r(); } };
+
+    const allChunks = [];
+    let segIndex = 0;
+    let failure = null;
+
+    const synthLane = (async () => {
+      try {
+        for (;;) {
+          while (queue.length === 0 && !prepDone) {
+            await new Promise(r => { gateResolve = r; });
+          }
+          if (queue.length === 0) return; /* prep done and drained */
+          const text = queue.shift();
+          segIndex++;
+          await synthesizeTtsSegment(text, segIndex, player, controller.signal, allChunks);
+        }
+      } catch (e) {
+        if (!failure && e.name !== 'AbortError') failure = e;
+        controller.abort(); /* tear the other lane down too */
+        throw failure || e;
+      }
+    })();
+
+    try {
+      await streamTtsPrepText(rawMarkdown, controller.signal, (delta) => {
+        for (const t of seg.push(delta)) { queue.push(t); wake(); }
+      });
+      for (const t of seg.flush()) { queue.push(t); wake(); }
+      prepDone = true;
+      wake();
+      await synthLane;
+      if (failure) throw failure;
+      player.finish();
+      return allChunks;
+    } catch (err) {
+      prepDone = true;
+      wake(); /* unstick the worker so it can observe the teardown */
+      controller.abort();
+      try { await synthLane; } catch (e) { if (!failure && e.name !== 'AbortError') failure = e; }
+      if (failure) throw failure;
+      throw err; /* genuine AbortError = deliberate cancel, stays silent */
+    }
   }
 
   /**
@@ -2825,6 +3143,16 @@
   async function toggleSpeak(contentEl, rawMarkdown) {
     if (!CONFIG || !contentEl || !speakBtnOf(contentEl)) return;
 
+    /* Case 0 (busy): this message's own pipeline is still preparing or
+     * synthesizing and nothing is audible yet. A tap here CANCELS it --
+     * previously the busy button ignored all input (pointer-events:none
+     * in CSS), leaving the user stuck blinking through a long stage-1
+     * LLM call with no way out. */
+    if (activeTts.contentEl === contentEl && speakBtnOf(contentEl).classList.contains('busy')) {
+      stopActiveTts();
+      return;
+    }
+
     /* Case 1: pause/resume toggle. */
     if (activeTts.contentEl === contentEl) return toggleTtsPlayback(contentEl);
 
@@ -2838,25 +3166,18 @@
 
     let entry = ttsAudioCache.get(contentEl);
     try {
-      /* Case 3: full pipeline (only when no cached audio). */
+      /* Case 3: full pipeline (only when no cached audio). runTtsPipeline
+       * overlaps EVERYTHING that can be overlapped: prose streams out of
+       * stage 1, gets segmented mid-flight, synthesis of early segments
+       * runs while later prose is still being generated, and each
+       * segment's PCM is audible as it arrives. When the last segment's
+       * body completes, the whole-session WAV is cached for free
+       * replays. */
       if (!entry?.blobUrl) {
         setSpeakIcon(contentEl, 'busy');
         player = startStreamingTts(contentEl);
-
-        const spokenText = await prepareTtsText(rawMarkdown, controller.signal);
-        const res = await apiFetch('v1/audio/speech', {
-          model: TTS_MODEL_ID,
-          input: spokenText.slice(0, TTS_MAX_CHARS),
-          voice: CONFIG.ttsVoice,
-          language: 'Auto',
-          instruct: CONFIG.ttsInstruct,
-          response_format: 'pcm', /* raw 16-bit LE mono @ 24 kHz: streams */
-          service_tier: 'priority' /* to reduce latency */
-        }, controller.signal);
-        if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Speech synthesis failed');
-        if (!res.body) throw new Error('Audio streaming is not supported by this transport');
-
-        entry = await streamTtsAudio(res, player, contentEl);
+        const allChunks = await runTtsPipeline(rawMarkdown, controller, player);
+        entry = buildTtsCacheEntry(allChunks, contentEl);
         ttsAudioCache.set(contentEl, entry);
         return; /* keep playing via the live stream; the cache is ready */
       }
@@ -2869,8 +3190,15 @@
         activeTts = { contentEl: null, controller: null, player: null };
         setSpeakIcon(contentEl, 'idle');
         /* An AbortError here means another message's speak button took
-         * over and cancelled this fetch -- nothing to report. */
-        if (err.name !== 'AbortError') setError(contentEl, err.message || 'Speech synthesis failed');
+         * over -- or the user tapped the blinking button to cancel --
+         * and this pipeline was torn down deliberately: nothing to
+         * report. Everything else is reported WITH its stage label,
+         * model name, sizes and HTTP detail, so the user knows exactly
+         * which half of the two-stage pipeline died and why. */
+        if (err.name !== 'AbortError') {
+          setError(contentEl, (err.message || 'Speech synthesis failed') +
+            ' (source reply: ' + rawMarkdown.length + ' chars)');
+        }
       }
     }
   }
@@ -3082,7 +3410,7 @@
     );
 
     const res = await apiFetch(CONFIG.apiPath, payload, signal);
-    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error?.message || res.statusText || 'Request failed');
+    if (!res.ok) throw new Error(`Chat request (model ${activeModel}) failed: ` + await httpErrorDetail(res));
 
     const reader = res.body.getReader(), decoder = new TextDecoder();
     let buffer = '';
@@ -3415,7 +3743,7 @@
     try {
       const res = await apiFetch('v1/openai/images/generations', payload, signal);
       if (!res.ok) {
-        const err = (await res.json().catch(() => null))?.error?.message || res.statusText;
+        const err = `Image request (model ${targetModel}) failed: ` + await httpErrorDetail(res);
         setError(contentEl, err);
         addRetryButton(contentEl, onRetry);
         conversationHistory.pop();
