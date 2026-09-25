@@ -907,12 +907,26 @@
     flex-direction: column;
   }
 
+  /* Width is capped so the form is a reasonable CONSOLE WINDOW on wide
+   * landscape screens, not a full-viewport slab: the old width:100% let
+   * every input stretch edge-to-edge across the entire desktop monitor.
+   * Horizontal centering comes free from the overlay (a column flex
+   * container + margin:0 auto), no JS or positioning tricks. On narrow
+   * screens max-width never bites and the form fills the viewport as
+   * before. The amber-dim side edges are the window frame: per the
+   * monochrome-CRT rule, every structural line uses the dim phosphor of
+   * the space it lives in (amber = user input space). */
   .settings-form {
     width: 100%;
+    max-width: 640px;
     height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--bg);
+    border-left: 1px solid var(--amber-dim);
+    border-right: 1px solid var(--amber-dim);
+    margin: 0 auto;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
   }
 
   .settings-header {
