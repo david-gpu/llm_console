@@ -410,6 +410,16 @@
   .conversation-wrap {
     flex: 1 1 auto;
     overflow-y: auto;
+    /* Kill lateral scrolling. Per the CSS overflow spec, `overflow-y:auto`
+     * with overflow-x left at its initial `visible` COMPUTES to `auto` on
+     * the x axis too, so the conversation was secretly a horizontal scroll
+     * container: any child that ever rendered a fraction wider than the
+     * column (a wide markdown table, an unbreakable token, a long URL)
+     * made the whole pane pannable sideways into the black void. Clipping
+     * is the correct semantics here -- code blocks keep their own internal
+     * overflow-x:auto, so nothing legitimate ever needs the pane itself
+     * to scroll horizontally. */
+    overflow-x: hidden;
     padding: 16px 14px 24px;
     display: flex;
     flex-direction: column;
@@ -1766,6 +1776,11 @@
       ? DOMPurify.sanitize(marked.parse(text))
       : escapeHtml(text);
     enhanceCodeBlocks(contentEl);
+    /* Every render (streamed frame or telemetry line) grows the message, so
+     * re-fit the spacer on every render: the deeper the real content, the
+     * less phantom height remains. No-op once the turn has ended and the
+     * spacer has been retired. */
+    sizeScrollSpacer(contentEl.parentElement);
   }
 
   /**
@@ -1984,6 +1999,10 @@
     pendingRenderData = null;
     contentEl.classList.remove('placeholder');
     dismissThinking(contentEl);
+    /* Abort finishes the turn: same spacer retirement as
+     * completeAssistantTurn, so a stopped reply also becomes the scroll
+     * floor. */
+    removeScrollSpacer();
     if (text) renderMarkdown(contentEl, text); else contentEl.textContent = '';
     contentEl.innerHTML += `<div class="error-msg-text">&lt; EXECUTION ABORTED BY USER &gt;</div>`;
   }
@@ -2393,8 +2412,41 @@
     removeScrollSpacer();
     scrollSpacer = document.createElement('div');
     scrollSpacer.className = 'scroll-spacer';
-    scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
+    /* Created at height 0, not the old fixed viewport height: the exact
+     * required height is computed by sizeScrollSpacer() at alignment time
+     * (see alignAssistantToTop), so the spacer can never reserve a full
+     * screen of scrollable emptiness up front. */
+    scrollSpacer.style.height = '0px';
     conversationWrap.appendChild(scrollSpacer);
+  }
+
+  /**
+   * Sizes the bottom spacer to the EXACT extra height needed to keep the
+   * top of msgEl pinnable at the top of the viewport -- never a full blank
+   * screen more. The old fixed clientHeight-tall spacer meant maxScroll
+   * always sat at least one viewport beyond the end of the real content,
+   * i.e. the user could always scroll into the void, during AND after a
+   * turn. With exact sizing:
+   *   - while the live message is shorter than the viewport, the deepest
+   *     scroll position lands precisely on the pinned message (its top at
+   *     the viewport top);
+   *   - once the message outgrows the viewport, the required extra height
+   *     collapses to 0 and scrolling is bounded by the natural content;
+   *   - because the browser clamps scrollTop whenever scrollHeight
+   *     shrinks, every re-size also ejects any overscroll the user had
+   *     already accumulated into the void.
+   */
+  function sizeScrollSpacer(msgEl) {
+    if (!scrollSpacer || !msgEl || !msgEl.parentElement) return;
+    const spacerH = scrollSpacer.offsetHeight;
+    /* Content height WITHOUT the spacer (the spacer is the last child). */
+    const naturalH = conversationWrap.scrollHeight - spacerH;
+    /* msgEl's top, measured in the wrap's scroll coordinates. */
+    const msgTop = msgEl.getBoundingClientRect().top
+                 - conversationWrap.getBoundingClientRect().top
+                 + conversationWrap.scrollTop;
+    scrollSpacer.style.height =
+      Math.max(0, conversationWrap.clientHeight - (naturalH - msgTop)) + 'px';
   }
 
   /**
@@ -2403,7 +2455,9 @@
    */
   function alignAssistantToTop(msgEl) {
     if (!msgEl || !msgEl.parentElement) return;
-    if (scrollSpacer) scrollSpacer.style.height = conversationWrap.clientHeight + 'px';
+    /* Size BEFORE scrolling: the pinned position must be reachable, i.e.
+     * the spacer must be tall enough for scrollTop = msgTop to be legal. */
+    sizeScrollSpacer(msgEl);
     conversationWrap.scrollTop += (msgEl.getBoundingClientRect().top - conversationWrap.getBoundingClientRect().top);
   }
 
@@ -3549,6 +3603,12 @@
    * the turn id so edit/retry rolls it back with the rest of the turn),
    * and re-arm the input controls. */
   function completeAssistantTurn(contentEl, fullText, displayPrompt, fullPayload, turnId) {
+    /* The turn is over: retire the spacer so the scroll range ends at the
+     * conversation's real bottom. The browser clamps scrollTop to the new
+     * (smaller) maximum, which lands the viewport on the end of the
+     * conversation instead of leaving the reply pinned at the top with a
+     * screen of emptiness below it. */
+    removeScrollSpacer();
     renderMarkdown(contentEl, fullText);
     addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
     addSpeakButton(contentEl, fullText);
@@ -3650,6 +3710,10 @@
       }
       setError(contentEl, err.message || 'Request failed');
       addRetryButton(contentEl, () => retryTurn(contentEl.parentElement, false, displayPrompt, fullPayload));
+      /* Failed turns end too: retire the spacer so the error message is
+       * the scroll floor. (Abort turns are covered by
+       * finalizeStoppedResponse.) */
+      removeScrollSpacer();
       /* This entry point is the turn owner (there is no recursion), so it
        * pops the user entry it pushed in buildApiMessages. */
       conversationHistory.pop();
@@ -3680,6 +3744,9 @@
          * when the scrollbar is suppressed, which is what pins the newest
          * tokens on screen without ever growing the document. */
         thinkEl.scrollTop = thinkEl.scrollHeight;
+        /* The reasoning tail grows the message too: keep the spacer
+         * exactly fitted so no scrollable void accumulates below it. */
+        sizeScrollSpacer(thinkEl.parentElement);
         thinkRenderScheduled = false;
       });
     }
@@ -3746,6 +3813,7 @@
         const err = `Image request (model ${targetModel}) failed: ` + await httpErrorDetail(res);
         setError(contentEl, err);
         addRetryButton(contentEl, onRetry);
+        removeScrollSpacer();
         conversationHistory.pop();
         resetInput();
         return;
@@ -3765,6 +3833,11 @@
       imgEl.onclick = () => openLightbox(imageUrl);
       contentEl.appendChild(imgEl);
       addRetryButton(contentEl, onRetry);
+      /* Turn over: retire the spacer. The image may still grow into its
+       * natural size after load, but that only extends the NATURAL content
+       * (and the natural scroll range) -- the phantom scrollable void is
+       * gone either way. */
+      removeScrollSpacer();
 
       lastGeneratedImageUrl = imageUrl;
       pushHistoryEntry({ role: 'assistant', type: 'image', url: imageUrl, turnId });
@@ -3778,6 +3851,7 @@
       }
       setError(contentEl, err.message || 'Image request failed');
       addRetryButton(contentEl, onRetry);
+      removeScrollSpacer();
       conversationHistory.pop();
       resetInput();
     }
