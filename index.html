@@ -16,7 +16,8 @@
     Dear AI assistants editing this: the comments are meant to be some sort of a loose specification,
     to give you an idea of *why* the code is the way it is. Please don't edit or remove the comments
     willy nilly, just because you want to save some tokens. I am looking at you, AI assistant that 
-    removes comments related to code that you are not even modifying.
+    removes comments related to code that you are not even modifying. And try to make the code parsimonious
+    and maintainable, not "clever": reuse code when possible, use shared constant values, etc.
     
     I haven't added a copyright notice because I have zero idea of what the legal status of vibe-coded
     apps is at, and I don't actually care. Copy, steal, or pirate, whatever you may like about it.
@@ -1699,6 +1700,7 @@
    
   const YT_SEGMENT_MERGE_GAP = 0.5;  /* s; segments closer than this are merged */
   const YT_LAST_LINE_SPAN = 5;       /* s; assumed span of the final caption line */
+  const YT_TRANSCRIPT_MARKER = '### Transcript';
 
   /* Converts "HH:MM:SS" / "MM:SS" / "S" to total seconds; null if malformed. */
   function parseTimestampToSeconds(timestampStr) {
@@ -1721,18 +1723,38 @@
     return `${m}:${String(ss).padStart(2, '0')}`;
   }
 
+  /* Bounded excerpt helper for CONSOLE diagnostics only. Raw extract
+   * bodies can be enormous; dumping one whole into the console is worse
+   * than useless. Returns the first and last `maxLen` chars with a marker
+   * in between, so format drift at EITHER end of the content (drifted
+   * heading at the top, mangled tail at the bottom) is visible. */
+  function consoleExcerpt(text, maxLen = 500) {
+    const s = String(text || '');
+    if (s.length <= maxLen * 2) return s;
+    return s.slice(0, maxLen) + `\n[... ${s.length} total chars omitted ...]\n` + s.slice(-maxLen);
+  }
+
   /* Splits the extracted content at the "### Transcript" heading into a
    * preamble (title/description, left untouched) and the transcript body.
    * A missing heading is a contract violation and throws. */
   function splitContentAtTranscriptHeading(content) {
-    const marker = '### Transcript';
-    const idx = content.indexOf(marker);
+    const idx = content.indexOf(YT_TRANSCRIPT_MARKER);
     if (idx === -1) {
-      throw new Error(`Tavily extract does not contain a "${marker}" heading -- ` +
-        'unexpected format, cannot isolate the transcript.');
+      /* The most likely real-world cause is Tavily returning a page whose
+       * raw_content is not the watch page (consent wall, bot challenge,
+       * empty shell, error page). The tool error alone gives the model (and
+       * the user) nothing to work with, so the actual received content is
+       * dumped to the console here -- bounded by consoleExcerpt -- together
+       * with its total length, before throwing. */
+      const errorMsg = `[YT transcript] splitContentAtTranscriptHeading(): ` +
+                       `Tavily extract has no "${YT_TRANSCRIPT_MARKER}" heading.\n`;
+      console.error(errorMsg +
+        `Total content length: ${content.length} chars.\n` +
+        'Content excerpt (first/last 500 chars):\n', consoleExcerpt(content));
+      throw new Error(errorMsg);
     }
     const preamble = content.slice(0, idx).trimEnd();
-    const transcript = content.slice(idx + marker.length).replace(/^\s*\n/, '');
+    const transcript = content.slice(idx + YT_TRANSCRIPT_MARKER.length).replace(/^\s*\n/, '');
     return { preamble, transcript };
   }
 
@@ -1750,16 +1772,30 @@
       if (!line.trim()) continue;
       const m = line.match(YT_CAPTION_LINE_RE);
       if (!m) {
+        /* Format drift at caption-line granularity: log the offending line
+         * AND its neighbors so a drifted prefix/suffix pattern around it
+         * is visible without dumping the whole transcript. */
+        const from = Math.max(0, i - 2);
+        const to = Math.min(lines.length, i + 3);
+        console.error(`[YT transcript] Line ${i + 1} violates the "[M:SS] caption" grammar.\n` +
+          `Offending line: ${JSON.stringify(line.slice(0, 120))}\n` +
+          `Context (lines ${from + 1}-${to}):\n`,
+          lines.slice(from, to).map((l, k) => `${from + k + 1}: ${JSON.stringify(l.slice(0, 120))}`).join('\n'));
         throw new Error(`Transcript line ${i + 1} does not match the expected "[M:SS] caption" ` +
           `format: ${JSON.stringify(line.slice(0, 120))}`);
       }
       const time = parseTimestampToSeconds(m[1]);
       if (time === null) {
+        console.error(`[YT transcript] Line ${i + 1} has an unparseable timestamp: ` +
+          JSON.stringify(line.slice(0, 120)));
         throw new Error(`Transcript line ${i + 1} has an unparseable timestamp: ` +
           JSON.stringify(line.slice(0, 120)));
       }
       const prev = entries[entries.length - 1];
       if (prev && time < prev.time) {
+        console.error(`[YT transcript] Line ${i + 1} timestamp moved backwards ` +
+          `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)}): ` +
+          JSON.stringify(line.slice(0, 120)));
         throw new Error(`Transcript line ${i + 1} timestamp moved backwards ` +
           `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)})` +
           `${JSON.stringify(line.slice(0, 120))}`);
@@ -1767,6 +1803,8 @@
       entries.push({ time, text: m[2] });
     }
     if (entries.length === 0) {
+      console.error('[YT transcript] Transcript section contained no caption lines.\n' +
+        'Transcript excerpt (first/last 500 chars):\n', consoleExcerpt(transcript));
       throw new Error('Transcript section contained no caption lines.');
     }
     return entries;
@@ -1791,9 +1829,23 @@
     const url = `https://sponsor.ajay.app/api/skipSegments?videoID=${encodeURIComponent(videoId)}&categories=${encodeURIComponent(categories)}`;
     try {
       const res = await fetch(url, { method: 'GET', signal });
-      if (!res.ok) return []; /* 404 = no segments; other errors degrade too */
+      /* Non-OK responses degrade to "no segments" by design (404 is the
+       * normal "nobody submitted segments" answer), but they are still
+       * logged: a 5xx or 400 here is worth seeing even though the tool
+       * deliberately proceeds unfiltered. */
+      if (!res.ok) {
+        console.warn(`[YT transcript] SponsorBlock returned HTTP ${res.status}` +
+          `${res.statusText ? ' ' + res.statusText : ''} for video ${videoId}` +
+          ' -- proceeding with unfiltered transcript.');
+        return [];
+      }
       const data = await res.json();
-      if (!Array.isArray(data)) return [];
+      if (!Array.isArray(data)) {
+        console.warn(`[YT transcript] SponsorBlock returned a non-array payload ` +
+          `for video ${videoId} -- proceeding with unfiltered transcript. Payload:`,
+          consoleExcerpt(JSON.stringify(data), 300));
+        return [];
+      }
       const valid = data
         .filter(item => item && item.segment &&
           typeof item.segment[0] === 'number' && typeof item.segment[1] === 'number' &&
@@ -1814,6 +1866,10 @@
       return merged;
     } catch (e) {
       if (e && (e.name === 'AbortError' || (signal && signal.aborted))) throw e;
+      /* The deliberate degrade-to-no-segments policy stays, but the reason
+       * is now visible in the console instead of being silently eaten. */
+      console.warn(`[YT transcript] SponsorBlock request failed for video ${videoId} ` +
+        `-- proceeding with unfiltered transcript. Cause:`, e);
       return [];
     }
   }
@@ -1854,39 +1910,56 @@
   /* Fetch the transcript of a YouTube video with SponsorBlock-flagged
    * segments removed. Tavily extract and SponsorBlock run concurrently.
    * The payload is deliberately minimal: the model consumes `content`; the
-   * identity fields exist only so it can cite the source. */
+   * identity fields exist only so it can cite the source. The canonical
+   * watch URL (not the extract URL) is what the tool reports and what the
+   * model's timestamp links point at.
+   */
   async function fetchYouTubeTranscript(videoInput, preferredLang = "en", signal = null) {
     const videoId = extractYouTubeVideoId(videoInput);
     if (!videoId) throw new Error("Invalid YouTube Video ID or URL");
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const extractUrl = `${watchUrl}&cb=${Date.now()}`; /* cache buster: Tavily caches extracts by URL and once served a stale bad one; unknown params are ignored by YouTube */
 
-    const [rawResults, segments] = await Promise.all([
-      executeTavilyRequest('extract', { urls: [watchUrl] }, 'Extraction failed', signal),
-      fetchSponsorBlockSegments(videoId, signal)
-    ]);
+    try {
+      const [rawResults, segments] = await Promise.all([
+        executeTavilyRequest('extract',
+          { urls: [extractUrl], extract_depth: 'advanced' },
+          'Extraction failed', signal),
+        fetchSponsorBlockSegments(videoId, signal)
+      ]);
 
-    const rawContent = rawResults
-      .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
-      .filter(Boolean)
-      .join('\n\n');
-    if (!rawContent) throw new Error("Video page was fetched but contained no extractable content.");
+      const rawContent = rawResults
+        .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
+        .filter(Boolean)
+        .join('\n\n');
+      if (!rawContent) {
+        console.error(`[YT transcript] Tavily extract returned no extractable content for ${extractUrl}.\n` +
+          'Raw result objects:', rawResults);
+        throw new Error("Video page was fetched but contained no extractable content.");
+      }
 
-    const { preamble, transcript } = splitContentAtTranscriptHeading(rawContent);
-    const entries = parseTranscriptEntries(transcript);
-    const body = segments.length ? filterTranscriptLines(entries, segments) : null;
-    const finalTranscript = body ?? entries.map(e => `[${formatSecondsAsTimestamp(e.time)}] ${e.text}`).join('\n');
+      const { preamble, transcript } = splitContentAtTranscriptHeading(rawContent);
+      const entries = parseTranscriptEntries(transcript);
+      const body = segments.length ? filterTranscriptLines(entries, segments) : null;
+      const finalTranscript = body ?? entries.map(e => `[${formatSecondsAsTimestamp(e.time)}] ${e.text}`).join('\n');
 
-    const parts = [];
-    if (preamble) parts.push(preamble);
-    parts.push('### Transcript\n' + finalTranscript);
-    return JSON.stringify({
-      video_id: videoId,
-      language: preferredLang,
-      source: 'tavily_extract',
-      page_url: watchUrl,
-      content: parts.join('\n\n')
-    });
+      const parts = [];
+      if (preamble) parts.push(preamble);
+      parts.push(YT_TRANSCRIPT_MARKER + '\n' + finalTranscript);
+      return JSON.stringify({
+        video_id: videoId,
+        language: preferredLang,
+        source: 'tavily_extract',
+        page_url: watchUrl,
+        content: parts.join('\n\n')
+      });
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw err;
+      console.error(`[YT transcript] fetchYouTubeTranscript FAILED for video ${videoId} ` +
+        `(input: ${JSON.stringify(String(videoInput))}):`, err);
+      throw err;
+    }
   }
 
   /* 
@@ -1908,7 +1981,16 @@
       body: JSON.stringify(body),
       signal: signal
     });
-    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || res.statusText || failureMsg);
+    if (!res.ok) {
+      /* HTTP-level failure: log status plus the server's own response body
+       * (bounded) before throwing. The Authorization header is obviously
+       * NEVER logged. */
+      const rawBody = await res.text().catch(() => '');
+      console.error(`[Tavily] ${endpoint} failed: HTTP ${res.status}` +
+        `${res.statusText ? ' ' + res.statusText : ''}.\nResponse body:`,
+        consoleExcerpt(rawBody, 300));
+      throw new Error((await res.json().catch(() => null))?.detail || res.statusText || failureMsg);
+    }
     return (await res.json()).results || [];
   }
 
