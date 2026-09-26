@@ -1734,6 +1734,29 @@
     return s.slice(0, maxLen) + `\n[... ${s.length} total chars omitted ...]\n` + s.slice(-maxLen);
   }
 
+  /* Error-message single-source helper: the string packed into the
+   * exception is built exactly ONCE; console.error receives that same
+   * message plus any console-only diagnostics (extra text appended to
+   * the log line, and/or a value -- e.g. a bounded excerpt -- logged
+   * alongside it). Replaces the hand-duplicated pattern where the
+   * console line and the thrown Error each rebuilt a near-identical
+   * string, which could (and did) drift apart in wording and spacing.
+   * The thrown message deliberately carries the bracketed tool tag:
+   * tool failures surface to the model as tool results, and that tag is
+   * the only context it gets about where the failure came from. */
+  function logAndThrow(message, detailText, detailValue) {
+    const logLine = detailText ? message + '\n' + detailText : message;
+    if (detailValue === undefined) console.error(logLine);
+    else console.error(logLine, detailValue);
+    throw new Error(message);
+  }
+
+  /* Bounded, quoted single-line excerpt for strict-parse error messages. */
+  const YT_ERR_LINE_CHARS = 120;
+  function excerptLine(line) {
+    return JSON.stringify(line.slice(0, YT_ERR_LINE_CHARS));
+  }
+
   /* Splits the extracted content at the "### Transcript" heading into a
    * preamble (title/description, left untouched) and the transcript body.
    * A missing heading is a contract violation and throws. */
@@ -1746,12 +1769,12 @@
        * the user) nothing to work with, so the actual received content is
        * dumped to the console here -- bounded by consoleExcerpt -- together
        * with its total length, before throwing. */
-      const errorMsg = `[YT transcript] splitContentAtTranscriptHeading(): ` +
-                       `Tavily extract has no "${YT_TRANSCRIPT_MARKER}" heading.\n`;
-      console.error(errorMsg +
+      logAndThrow(
+        `[YT transcript] splitContentAtTranscriptHeading(): ` +
+        `Tavily extract has no "${YT_TRANSCRIPT_MARKER}" heading.`,
         `Total content length: ${content.length} chars.\n` +
-        'Content excerpt (first/last 500 chars):\n', consoleExcerpt(content));
-      throw new Error(errorMsg);
+        'Content excerpt (first/last 500 chars):',
+        consoleExcerpt(content));
     }
     const preamble = content.slice(0, idx).trimEnd();
     const transcript = content.slice(idx + YT_TRANSCRIPT_MARKER.length).replace(/^\s*\n/, '');
@@ -1777,35 +1800,28 @@
          * is visible without dumping the whole transcript. */
         const from = Math.max(0, i - 2);
         const to = Math.min(lines.length, i + 3);
-        console.error(`[YT transcript] Line ${i + 1} violates the "[M:SS] caption" grammar.\n` +
-          `Offending line: ${JSON.stringify(line.slice(0, 120))}\n` +
-          `Context (lines ${from + 1}-${to}):\n`,
-          lines.slice(from, to).map((l, k) => `${from + k + 1}: ${JSON.stringify(l.slice(0, 120))}`).join('\n'));
-        throw new Error(`Transcript line ${i + 1} does not match the expected "[M:SS] caption" ` +
-          `format: ${JSON.stringify(line.slice(0, 120))}`);
+        logAndThrow(
+          `[YT transcript] Transcript line ${i + 1} does not match the expected ` +
+          `"[M:SS] caption" format: ${excerptLine(line)}`,
+          `Context (lines ${from + 1}-${to}):`,
+          lines.slice(from, to).map((l, k) => `${from + k + 1}: ${excerptLine(l)}`).join('\n'));
       }
       const time = parseTimestampToSeconds(m[1]);
       if (time === null) {
-        console.error(`[YT transcript] Line ${i + 1} has an unparseable timestamp: ` +
-          JSON.stringify(line.slice(0, 120)));
-        throw new Error(`Transcript line ${i + 1} has an unparseable timestamp: ` +
-          JSON.stringify(line.slice(0, 120)));
+        logAndThrow(`[YT transcript] Transcript line ${i + 1} has an unparseable timestamp: ${excerptLine(line)}`);
       }
       const prev = entries[entries.length - 1];
       if (prev && time < prev.time) {
-        console.error(`[YT transcript] Line ${i + 1} timestamp moved backwards ` +
+        logAndThrow(
+          `[YT transcript] Transcript line ${i + 1} timestamp moved backwards ` +
           `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)}): ` +
-          JSON.stringify(line.slice(0, 120)));
-        throw new Error(`Transcript line ${i + 1} timestamp moved backwards ` +
-          `(${formatSecondsAsTimestamp(prev.time)} -> ${formatSecondsAsTimestamp(time)})` +
-          `${JSON.stringify(line.slice(0, 120))}`);
+          excerptLine(line));
       }
       entries.push({ time, text: m[2] });
     }
     if (entries.length === 0) {
-      console.error('[YT transcript] Transcript section contained no caption lines.\n' +
-        'Transcript excerpt (first/last 500 chars):\n', consoleExcerpt(transcript));
-      throw new Error('Transcript section contained no caption lines.');
+      logAndThrow('[YT transcript] Transcript section contained no caption lines.',
+        'Transcript excerpt (first/last 500 chars):', consoleExcerpt(transcript));
     }
     return entries;
   }
@@ -1925,7 +1941,7 @@
       const [rawResults, segments] = await Promise.all([
         executeTavilyRequest('extract',
           { urls: [extractUrl], extract_depth: 'advanced' },
-          'Extraction failed', signal),
+          signal),
         fetchSponsorBlockSegments(videoId, signal)
       ]);
 
@@ -1934,9 +1950,9 @@
         .filter(Boolean)
         .join('\n\n');
       if (!rawContent) {
-        console.error(`[YT transcript] Tavily extract returned no extractable content for ${extractUrl}.\n` +
+        logAndThrow(
+          `[YT transcript] Tavily extract returned no extractable content for ${extractUrl}.`,
           'Raw result objects:', rawResults);
-        throw new Error("Video page was fetched but contained no extractable content.");
       }
 
       const { preamble, transcript } = splitContentAtTranscriptHeading(rawContent);
@@ -1973,7 +1989,7 @@
    * swallowed into a tool-error result) so the whole turn tears down cleanly.
    * ==========================================================================
    */
-  async function executeTavilyRequest(endpoint, body, failureMsg, signal) {
+  async function executeTavilyRequest(endpoint, body, signal) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const res = await fetch('https://api.tavily.com/' + endpoint, {
       method: 'POST',
@@ -1982,14 +1998,13 @@
       signal: signal
     });
     if (!res.ok) {
-      /* HTTP-level failure: log status plus the server's own response body
-       * (bounded) before throwing. The Authorization header is obviously
-       * NEVER logged. */
-      const rawBody = await res.text().catch(() => '');
-      console.error(`[Tavily] ${endpoint} failed: HTTP ${res.status}` +
-        `${res.statusText ? ' ' + res.statusText : ''}.\nResponse body:`,
-        consoleExcerpt(rawBody, 300));
-      throw new Error((await res.json().catch(() => null))?.detail || res.statusText || failureMsg);
+      /* HTTP-level failure: ONE build of the message, via the shared
+       * httpErrorDetail (status line plus the server's own error text,
+       * bounded to 300 chars), logged and thrown together. The
+       * Authorization header is obviously NEVER logged. (The old code
+       * called res.json() AFTER res.text() had already consumed the body,
+       * so the JSON error detail it tried to surface was dead code.) */
+      logAndThrow(`[Tavily] ${endpoint} failed: ` + await httpErrorDetail(res));
     }
     return (await res.json()).results || [];
   }
@@ -1998,12 +2013,12 @@
     return JSON.stringify(await executeTavilyRequest(
       'search',
       { query: query, max_results: 5, search_depth: 'basic' },
-      'Search failed', signal));
+      signal));
   }
 
   async function executeTavilyExtract(urls, signal) {
     const list = Array.isArray(urls) ? urls : [urls];
-    return JSON.stringify(await executeTavilyRequest('extract', { urls: list }, 'Extraction failed', signal));
+    return JSON.stringify(await executeTavilyRequest('extract', { urls: list }, signal));
   }
 
   /**
