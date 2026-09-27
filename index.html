@@ -1467,6 +1467,15 @@
   /* APP STATE */
   let CONFIG = null;
   let conversationHistory = [];
+  /* Soft-compaction cutoff: the turnId at which the replayed window
+   * begins. Entries belonging to turns with a SMALLER turnId are excluded
+   * from the REQUEST only -- never from conversationHistory, the DOM, or
+   * edit/retry, which all keep operating on the full timeline. 0 means
+   * "nothing compacted; replay everything". Maintained by maybeCompact(),
+   * reset to 0 by rollbackConversationToUserMessage (an edit/retry into
+   * the compacted region brings the early conversation back into replay,
+   * and the next build re-compacts if needed). */
+  let compactFromTurnId = 0;
   /* Monotonic per-turn identifier. Every user message DOM node gets one
    * (data-turn-id) and every conversationHistory entry created by that
    * turn carries the same value, so edit/retry can roll history back BY
@@ -1636,12 +1645,58 @@
   });
 
   /**
-   * Generates timestamp + tool-availability suffix for system prompts, so the
-   * model is always told (a) the current date/time and (b) exactly which tools
-   * it may use this turn -- including the case where the Tavily-backed tools
-   * are not configured/allowed at all.
+   * STANDING RULES half of the system prompt: behavioral rules that never
+   * change for the life of a conversation. Concatenated with the user's
+   * CONFIG.systemPrompt into the single system message built by
+   * buildApiMessages. Contains NO volatile bytes (no date, no time, no
+   * tool budget): any byte that can change between turns must live in
+   * getRuntimeFacts() instead, because the system message is the cache
+   * anchor -- if it changes, the provider's prompt-prefix cache is
+   * invalidated from byte zero and the ENTIRE conversation re-prefills.
+   * The only sanctioned way this string changes mid-conversation is the
+   * user editing the system prompt in settings.
    */
-  function getFormattedRuntimeContext() {
+  function getStaticRules() {
+    return `# System Standing Rules\n\n` +
+           `## Youtube\n` +
+           `When summarizing a video, start right away with the substance, without ` +
+           `introductions or boilerplate like the channel name, the view count, or 'In this video...'.\n` +
+           `Write plain prose suited to be read aloud by a TTS engine, rather than bullet points. ` +
+           `Omit advertisements, sponsored content and self-promotions. ` +
+           `Include timestamps as links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n\n` +
+           `## Code blocks\n` +
+           `When providing fixes to code, do not post snippets with ` +
+           `ellipsis (...xyz unchanged from base...). Instead, provide the whole function with up-to-date comments.`;
+  }
+
+  /**
+   * VOLATILE half of what the old getFormattedRuntimeContext carried: the
+   * date, the hour-rounded time, and this turn's tool availability and
+   * call budget. Returned as a short prelude that buildApiMessages embeds
+   * in USER position -- prepended to the current turn's payload, and
+   * stored on the history entry so later turns replay it byte-verbatim.
+   *
+   * WHY USER POSITION: the prelude changes (hour flips, budget changes),
+   * and any changing byte kills the prefix cache from its position
+   * onward. At the tail of the request, a change costs only itself; at
+   * byte zero (the old design), it cost the whole conversation. The model
+   * loses nothing by learning the time in user position.
+   *
+   * WHY STORED: if the prelude were re-derived at replay time, each
+   * historical turn's replay would diverge from what was actually sent
+   * for it, re-billing roughly one exchange per turn. Storing it once at
+   * push time and replaying the stored string keeps every request a
+   * strict byte-prefix extension of the previous request: the only
+   * never-before-seen bytes are the new prelude and the new prompt.
+   *
+   * Time is coarsened to whole hours (>=30 min rounds up) so the string
+   * stays byte-stable for up to an hour -- the model gets "approximately
+   * 17:00", which is all it needs, and the cache gets a stable tail
+   * block. Note the stored copies keep their original timestamps forever:
+   * old turns carry the time they actually happened, which doubles as a
+   * chronological trace of the conversation.
+   */
+  function getRuntimeFacts() {
     const now = new Date();
     if (now.getMinutes() >= 30) now.setHours(now.getHours() + 1);
     now.setMinutes(0, 0, 0);
@@ -1660,18 +1715,20 @@
     return `# System Baseline Configuration\n` +
            `Date: ${dateStr}\n` +
            `Time: ${timeStr}\n\n` +
-           `## Youtube\n` +
-           `When summarizing a video, start right away with the substance, without ` +
-           `introductions or boilerplate like the channel name, the view count, or 'In this video...'.\n` +
-           `Write plain prose suited to be read aloud by a TTS engine, rather than bullet points. ` +
-           `Omit advertisements, sponsored content and self-promotions. ` +
-           `Include timestamps as links in the form ([MM:SS](https://youtu.be/<video_ID>?&t=<timestamp_seconds>)).\n\n` +
-           `## Code blocks\n` +
-           `When providing fixes to code, do not post snippets with ` +
-           `ellipsis (...xyz unchanged from base...). Instead, provide the whole function.` +
            `# Available Tools\n` +
-           `${toolLine}\n\n` +
-           `# User's Instructions\n`;
+           `${toolLine}\n\n`;
+  }
+
+  /* Prepends the runtime prelude to a user payload, handling BOTH payload
+   * shapes: a plain string (prelude concatenated) and a multimodal parts
+   * array (prelude inserted as the FIRST text part). Must be used
+   * IDENTICALLY at send time and at replay time so the historical replay
+   * is byte-faithful to what was originally sent -- never build the
+   * prelude embedding one way in one place and another way elsewhere. */
+  function withRuntimePrepend(runtime, content) {
+    if (typeof content === 'string') return runtime + content;
+    if (Array.isArray(content)) return [{ type: 'text', text: runtime }, ...content];
+    return content;
   }
   
   /*
@@ -2815,6 +2872,13 @@
        * rollback, i.e. silent corruption in the KEEP direction. */
       conversationHistory = conversationHistory.filter(e => (e.turnId ?? 0) < targetTurnId);
     }
+    /* Reset the compaction cutoff: the timeline just got shorter, and the
+     * edit/retry target may itself lie inside the compacted region -- the
+     * full early conversation must come back into replay for it. The next
+     * buildApiMessages re-compacts naturally if the window is over
+     * budget. Without this reset, compacted-away turns would stay
+     * invisible to an edit that resurrects them. */
+    compactFromTurnId = 0;
     const priorImageEntry = [...conversationHistory].reverse().find(m => m.type === 'image');
     lastGeneratedImageUrl = priorImageEntry ? priorImageEntry.url : null;
   }
@@ -3569,20 +3633,221 @@
     return (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
   }
 
-  /* Turn-owning rounds only: pushes the user entry into conversationHistory
-   * and replays the whole thread into apiMessages. NOTE ON THE REPLAY LOOP:
-   * image-generation history entries ({ role: 'assistant', type: 'image',
-   * url }) can never appear here. The mode lock (lockConversationMode) makes
-   * a single timeline either chat or image generation, never both, and this
-   * replay path only ever runs in chat-locked conversations. */
+  /* ==========================================================================
+   * SOFT CONTEXT COMPACTION
+   * Context is finite, so the replayed window cannot grow forever. When
+   * the RETAINED window (what would actually be sent) exceeds the budget,
+   * halve the DROPPABLE window by token mass: walk backwards from the
+   * newest entry until half the droppable mass is covered, and record
+   * that turn's id as the new cutoff. The trigger/land pair
+   * (100% -> ~50%) IS the hysteresis: after a compaction the retained
+   * window sits at half budget and grows append-only -- with maximal
+   * prefix-cache hits -- until it crosses the budget again. One window
+   * re-prefill per cycle is the entire cache cost; no cache can survive
+   * a trim anyway, since the cached prefix of the previous request no
+   * longer matches the new request's front.
+   *
+   * CRITICAL: the trigger measures the RETAINED mass, not the total
+   * history mass. Total never shrinks (compaction is soft -- stored
+   * history, the DOM, and edit/retry keep the full timeline), so a
+   * total-based trigger would stay tripped forever and creep the cutoff
+   * backward on EVERY turn, busting the cache per turn. Measuring the
+   * retained window is what makes the cutoff stable between compactions.
+   *
+   * The halving target, by contrast, is the DROPPABLE mass -- the
+   * retained window MINUS the pinned founding exchange. An earlier
+   * version halved the total retained mass, which counted the pinned
+   * founding exchange toward the half. When the half-point then landed
+   * ON the pinned turn (walk halts, cutoff unmoved: the documented
+   * no-op) or on the pinned turn's immediate successor (cutoff set to
+   * founding+1, but nothing lives below it except the pinned turn:
+   * a silent no-op that ALSO mutated state), compaction did nothing.
+   * Both cases shared the root cause -- the target included mass that
+   * can never be dropped -- so the target now excludes it. With a
+   * droppable-only target, the backwards walk always terminates on an
+   * entry whose removal actually shrinks the window.
+   *
+   * The cutoff is a turnId, so user/assistant pairs can never be split
+   * (every entry carries its turn's id, enforced by pushHistoryEntry).
+   * This granularity leaves exactly one irreducible no-op: if the
+   * single oldest droppable turn is by itself more than half the
+   * droppable mass, the half-point lands on it and setting the cutoff
+   * to its id drops nothing -- dropping it would split a turn, which
+   * the granularity forbids. The window then waits for growth to move
+   * the half-point into a newer turn and re-compacts on a later call.
+   * That is the same self-correcting property the founding-exchange
+   * halt always had, just narrowed to the minimum number of situations
+   * that can trigger it.
+   *
+   * The founding exchange is PINNED and always replays: the opening
+   * premise usually states the task the whole conversation serves, and
+   * pinning it keeps the [system][founding exchange] front region
+   * byte-stable across every compaction, so the cache bust starts at
+   * the cutoff, not at byte zero. The founding turn's identity is
+   * computed live by foundingTurnId() rather than hardcoded to 1,
+   * because rollback (edit/retry of the first turn) can delete turn 1
+   * entirely while nextTurnId never resets -- a literal `=== 1` pin
+   * would then point at nothing and leave the REAL opening exchange
+   * droppable.
+   * ==========================================================================
+   */
+  /* Rough input-token estimate: chars/4, computed ONCE per entry and
+   * memoized on it (entries are immutable after push -- rollback filters
+   * the array but never mutates surviving objects -- so the cached count
+   * can never go stale). Memoization matters at this budget's scale:
+   * conversations can run to thousands of entries, and recomputing via
+   * JSON.stringify over megabytes of content on every send would
+   * dominate the cost of building the request.
+   *
+   * Budget calibration for the ~1M-token flash models this app targets
+   * by default: the trigger deliberately sits FAR below the raw context
+   * window, because the headroom below it has to absorb everything that
+   * is NOT history replay: reasoning and output tokens (the reasoning-
+   * effort setting can emit a lot), in-flight tool results within the
+   * turn (a single YouTube transcript can run tens of thousands of
+   * tokens, and the default tool budget allows 8 calls), and chars/4
+   * estimate slop (optimistic for JSON-heavy and non-ASCII content).
+   * ~1M window - ~64k output reserve - ~240k worst-case tool results
+   * - ~15% slop lands at ~500k. Consequence: ordinary conversations
+   * never compact at all -- compaction is a safety valve, and the
+   * steady state is strict append-only faithful replay with maximal
+   * prefix-cache hits. If you point CONFIG.model at a small-context
+   * model via the dropdown or settings, TUNE THIS CONSTANT to that
+   * model (or the first oversized turn will fail at the host, not
+   * here). */
+  const COMPACT_BUDGET_TOKENS = 500000;
+
+  function historyEntryTokens(entry) {
+    if (entry.tokens === undefined) {
+      /* Measure what will actually be REPLAYED: stale base64 images are
+       * stripped on replay, so budgeting on the raw stored content would
+       * wildly overestimate. The runtime prelude is counted too (it is
+       * sent every turn). The `|| ''` guards the assistant image-history
+       * entry shape ({ type: 'image', url }) -- those cannot appear in
+       * chat mode (mode lock), but the guard costs nothing. */
+      const body = JSON.stringify(stripStaleImages(entry.content) || '');
+      const prelude = entry.runtime ? entry.runtime.length : 0;
+      entry.tokens = ((body.length + prelude) / 4) | 0;
+    }
+    return entry.tokens;
+  }
+
+  /* The oldest surviving turn id: compaction's "founding exchange" --
+   * the single turn that always replays, whatever the cutoff.
+   *
+   * O(1) BY INVARIANT, not by search: conversationHistory is sorted by
+   * non-decreasing turnId by construction, so the first element IS the
+   * minimum and the founding turn is simply read off the head:
+   *   - pushHistoryEntry is the only mutation gate and only appends;
+   *   - turn ids come from nextTurnId++ (monotonic), and all of a
+   *     turn's entries -- user entry, final/partial assistant entry --
+   *     are pushed before isProcessing clears and the next turn can
+   *     start, so appends arrive in non-decreasing turn-id order;
+   *   - rollbackConversationToUserMessage is the only remover and is an
+   *     order-preserving filter, which on a sorted array removes a
+   *     suffix of turns.
+   * Hence [0] is always the oldest surviving entry, whatever edits or
+   * retries have rolled back. (The head read cannot lie even in the
+   * `?? 0` defense-in-depth case: pushHistoryEntry throws on any
+   * untagged entry, so every real entry has a numeric turnId; the
+   * fallback only fires for an empty history, where 0 correctly means
+   * "no founding turn" and matches nothing -- real ids start at 1.)
+   * Called at most twice per send (maybeCompact, buildApiMessages). */
+  function foundingTurnId() {
+    return conversationHistory.length ? (conversationHistory[0].turnId ?? 0) : 0;
+  }
+
+  function maybeCompact() {
+    const founding = foundingTurnId();
+    let retained = 0, droppable = 0;
+    for (const e of conversationHistory) {
+      if (e.turnId >= compactFromTurnId || e.turnId === founding) {
+        const t = historyEntryTokens(e);
+        retained += t;
+        if (e.turnId !== founding) droppable += t;
+      }
+    }
+    if (retained <= COMPACT_BUDGET_TOKENS) return;
+    /* Nothing droppable exists (the pinned founding exchange alone is
+     * over budget) and nothing has been created after the cutoff yet.
+     * Leave the cutoff alone; growth will add droppable mass for a
+     * later compaction. */
+    if (droppable === 0) return;
+
+    /* Halve the droppable mass: walk backwards over the retained,
+     * non-pinned entries until half of it is covered, and pin the
+     * cutoff at the turn where the walk stops. Everything older than
+     * that turn (except the founding exchange) leaves the replay. */
+    let kept = 0;
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const e = conversationHistory[i];
+      if (e.turnId === founding || e.turnId < compactFromTurnId) continue;
+      kept += historyEntryTokens(e);
+      if (kept >= droppable / 2) {
+        compactFromTurnId = e.turnId;
+        return;
+      }
+    }
+    /* Unreachable in practice: the walk covers every droppable entry,
+     * so `kept` converges to `droppable` and the half test is satisfied
+     * at the latest on the oldest droppable entry. Defensive no-op. */
+  }
+
+
+  /* Turn-owning rounds only: decides compaction, pushes the user entry
+   * into conversationHistory, and builds the replayed apiMessages thread.
+   * NOTE ON THE REPLAY LOOP: image-generation history entries
+   * ({ role: 'assistant', type: 'image', url }) can never appear here. The
+   * mode lock (lockConversationMode) makes a single timeline either chat
+   * or image generation, never both, and this replay path only ever runs
+   * in chat-locked conversations.
+   *
+   * CACHE CONTRACT: the system message is built from stable inputs only,
+   * and each historical turn's replay is a PURE FUNCTION of its stored
+   * entry (stored prelude + stripStaleImages of stored content -- no
+   * re-derivation, no re-dating, no reformatting). Every request is
+   * therefore a strict byte-prefix extension of the previous one plus
+   * new tail bytes (the fresh prelude and the new prompt). Any future
+   * change that makes the replay of an old entry differ from what this
+   * same function produced for it last turn silently reintroduces
+   * mid-conversation cache busts. */
   function buildApiMessages(fullPayload, displayPrompt, turnId) {
-    pushHistoryEntry({ role: 'user', content: fullPayload, displayPrompt, turnId });
-    const messages = [{ role: 'system', content: getFormattedRuntimeContext() + CONFIG.systemPrompt }];
+    /* Compaction is decided BEFORE the current entry is pushed, so the
+     * budget judgment covers exactly the history that will be replayed
+     * beneath the new turn. */
+    maybeCompact();
+
+    /* This turn's prelude: computed once, sent once, stored once. The
+     * stored copy is what later turns replay, byte-verbatim. */
+    const runtime = getRuntimeFacts();
+
+    pushHistoryEntry({ role: 'user', content: fullPayload, displayPrompt, turnId, runtime });
+
+    /* The first turnID currently in the conversation */
+    const founding = foundingTurnId();
+
+    /* Single system message: standing rules + the user's system prompt.
+     * Deliberately free of date/time/tool-budget bytes (see
+     * getStaticRules) so it stays byte-identical turn to turn. */
+    const messages = [{ role: 'system', content: getStaticRules() + "\n# User's Instructions\n" + CONFIG.systemPrompt }];
+
     for (let i = 0; i < conversationHistory.length - 1; i++) {
       const item = conversationHistory[i];
-      messages.push({ role: item.role, content: stripStaleImages(item.content), ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}) });
+      /* Soft compaction filter: turns older than the cutoff drop out of
+       * the REPLAY only. conversationHistory, the DOM, edit/retry, and
+       * lastGeneratedImageUrl recovery all still see them. The founding
+       * exchange (turnId 1) is pinned and always replays. */
+      if (item.turnId < compactFromTurnId && item.turnId !== founding) continue;
+      const content = (item.runtime !== undefined)
+        ? withRuntimePrepend(item.runtime, stripStaleImages(item.content))
+        : stripStaleImages(item.content);
+      /* History stores only the FINAL assistant text, never the tool-call
+       * rounds (those live in the turn-scoped apiMessages and die with it).
+       * Persisting them would re-send huge tool results on every replay,
+       * so the replayed thread is final-text-only by design. */
+      messages.push({ role: item.role, content: content });
     }
-    messages.push({ role: 'user', content: fullPayload });
+    messages.push({ role: 'user', content: withRuntimePrepend(runtime, fullPayload) });
     return messages;
   }
 
