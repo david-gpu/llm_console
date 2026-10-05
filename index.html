@@ -984,7 +984,8 @@
     box-shadow: 0 0 6px rgba(255, 174, 26, 0.4);
   }
 
-  .field-history-wrap {
+  .field-history-wrap,
+  .field-copy-wrap {
     position: relative;
     display: flex;
     align-items: center;
@@ -996,7 +997,8 @@
     border-bottom-right-radius: 0;
   }
 
-  .history-toggle-btn {
+  .history-toggle-btn,
+  .copy-key-btn {
     flex: 0 0 auto;
     height: 41px;
     padding: 0 10px;
@@ -1010,7 +1012,8 @@
     justify-content: center;
   }
 
-  .history-toggle-btn:hover {
+  .history-toggle-btn:hover,
+  .copy-key-btn:hover {
     background: var(--amber-dim);
     border-color: var(--amber-phosphor);
   }
@@ -1296,7 +1299,10 @@
         <div class="settings-body">
           <div class="field">
             <label for="field-apiKey">API Key</label>
-            <input type="password" id="field-apiKey" class="term-font" placeholder="your API key">
+            <div class="field-copy-wrap">
+              <input type="password" id="field-apiKey" class="term-font" placeholder="your API key">
+              <button type="button" class="copy-key-btn" title="Copy key to clipboard"><svg width="14" height="14"><use href="#icon-copy"/></svg></button>
+            </div>
           </div>
           <div class="field">
             <label for="field-apiHost">API Host</label>
@@ -1316,7 +1322,10 @@
           </div>
           <div class="field">
             <label for="field-tavilyApiKey">Tavily API Key</label>
-            <input type="password" id="field-tavilyApiKey" class="term-font" placeholder="tvly-...">
+            <div class="field-copy-wrap">
+              <input type="password" id="field-tavilyApiKey" class="term-font" placeholder="tvly-...">
+              <button type="button" class="copy-key-btn" title="Copy key to clipboard"><svg width="14" height="14"><use href="#icon-copy"/></svg></button>
+            </div>
           </div>
           <div class="field">
             <label for="field-maxTavilyCalls">Max Tavily calls</label>
@@ -2473,6 +2482,15 @@
       const isOpen = dropdown.style.display === 'block';
       document.querySelectorAll('.history-dropdown').forEach(el => el.style.display = 'none');
       if (!isOpen) { populateHistoryDropdown(key); dropdown.style.display = 'block'; }
+    };
+  });
+
+  document.querySelectorAll('.copy-key-btn').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const input = btn.parentElement.querySelector('input');
+      if (!input || !input.value) return;
+      try { await navigator.clipboard.writeText(input.value); } catch (err) {}
     };
   });
 
