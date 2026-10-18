@@ -3024,10 +3024,10 @@
    *   spoken pause belongs.
    *   Stage 2 (synthesis): one POST per segment to v1/audio/speech,
    *   requested as raw PCM (16-bit signed LE, mono, 24 kHz), with
-   *   service_tier 'priority' on the FIRST segment only (click-to-sound
-   *   latency) and default afterwards (throughput; playback consumes audio
-   *   slower than the engine produces it). Each response body is consumed
-   *   as a STREAM: every whole-frame chunk is scheduled on the
+   *   service_tier 'priority' on the FIRST segment (click-to-sound
+   *   latency) and 'flex' on every later segment (throughput; playback
+   *   consumes audio slower than the engine produces it). Each response
+   *   body is consumed as a STREAM: every whole-frame chunk is scheduled on the
    *   AudioContext timeline the instant it arrives. Parity is per-body only
    *   (a trailing odd byte is dropped -- half a sample, inaudible), so
    *   bodies never weld into each other and the cached PCM stays
@@ -3395,7 +3395,7 @@
         if (queue.length === 0) return;
         const item = queue.shift();
         segIndex++;
-        const tier = first ? 'priority' : '';
+        const tier = first ? 'priority' : 'flex';
         first = false;
         await synthesizeSegment(item.text, tier, segIndex, controller.signal,
           (pcm, isBodyStart) => onSegmentPcm(pcm, isBodyStart, item.startsPara));
