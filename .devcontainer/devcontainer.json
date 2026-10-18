@@ -1,0 +1,45 @@
+{
+  "name": "Hardened agent sandbox",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+
+  // Only the workspace is mounted; do NOT add ~/.ssh, ~/.gnupg,
+  // ~/.gitconfig, or any other host paths. Note devcontainers mount
+  // the host's ~/.ssh *only if you ask via "mounts" or SSH forwarding
+  // features — simply omit them.
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+
+  // Resource + capability limits via plain docker run args
+  "runArgs": [
+    "--memory=8g",
+    "--cpus=4",
+    "--security-opt=no-new-privileges",
+    "--cap-drop=ALL"
+  ],
+
+  // CRITICAL: neutralize credential/IPC leakage from the host.
+  // VS Code forwards git credentials, SSH agent, and browser-opening
+  // IPC into the container by default. An agent could use your host
+  // git credentials to push to remotes, or open phishing URLs on your
+  // desktop. Clear them:
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": "",
+    "GPG_AGENT_INFO": "",
+    "GIT_ASKPASS": null,
+    "VSCODE_GIT_ASKPASS_MAIN": null,
+    "VSCODE_GIT_ASKPASS_NODE": null,
+    "VSCODE_GIT_ASKPASS_EXTRA_ARGS": null,
+    "VSCODE_GIT_IPC_HANDLE": null,
+    "VSCODE_IPC_HOOK_CLI": null,
+    "BROWSER": ""
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["saoudrizwan.claude-dev"] // Cline's extension ID
+    }
+  },
+  "postCreateCommand": "git config --global --add safe.directory /workspaces/*"
+}
