@@ -15,9 +15,9 @@
     large glazing, high-contrast neutrals, and dark vertical wood. Don't take it seriously. It's just a
     fun little project to scratch a few itches I had when using corporate LLM clients.
 
-    The interface is picked in Settings ("Interface") and stored in the config. ONLY CSS differs
-    between the two: the choice is a single `data-interface` attribute on <html> and the stylesheet
-    keys every theme off it. The DOM and all JS behavior are identical.
+    The interface theme is picked in Settings ("Interface Theme") and stored in the config. ONLY CSS
+    differs between the two: the choice is a single `data-interface` attribute on <html> and the
+    stylesheet keys every theme off it. The DOM and all JS behavior are identical.
 
     Dear AI assistants editing this: the comments are meant to be some sort of a loose specification,
     to give you an idea of *why* the code is the way it is. Please don't edit or remove the comments
@@ -1873,7 +1873,7 @@
                Applied on Save (like every other field), so Cancel keeps the
                interface the app opened with. -->
           <div class="field">
-            <label for="field-interfaceStyle">Interface</label>
+            <label for="field-interfaceStyle">Interface Theme</label>
             <select id="field-interfaceStyle" class="term-font">
               <option value="retrogrouch">Retrogrouch</option>
               <option value="mcmodern">McModern</option>
