@@ -2763,7 +2763,22 @@
   }
 
   function removeScrollSpacer() { 
-    if (scrollSpacer) { scrollSpacer.remove(); scrollSpacer = null; } 
+    if (!scrollSpacer) return;
+    /* Retiring the spacer shrinks scrollHeight, and the overflow-y:auto
+     * clamp would snap the view to the content's end (the "jump to the
+     * bottom" at end-of-turn). Preserve the current viewport instead:
+     * capture scrollTop, drop the spacer, then re-assert the same offset.
+     * The browser still clamps if the natural content truly cannot reach
+     * it, but it no longer *chooses* the bottom for us. */
+    const prevTop = conversationWrap.scrollTop;
+    scrollSpacer.remove();
+    scrollSpacer = null;
+    /* Force layout so the assignment below is validated against the NEW
+     * (natural) scrollHeight, not the stale one that still included the
+     * spacer -- otherwise the browser clamps to the old max and still
+     * snaps to the bottom. */
+    void conversationWrap.scrollHeight;
+    conversationWrap.scrollTop = prevTop;
   }
 
   function addScrollSpacer() {
@@ -2988,7 +3003,11 @@
     target.disabled = false;
     target.innerHTML = useIcon('stop', 14, 14);
     target.classList.add('stop');
-    promptInput.disabled = true;
+    /* The prompt stays TYPABLE during a turn so the user can compose their
+     * next message while the reply streams. Sending is still blocked by the
+     * isProcessing guards in sendPrompt()/the keydown handler and by the
+     * send button being in stop mode, so a draft cannot launch a second
+     * request. resetInput() must therefore preserve any such draft. */
     attachBtn.disabled = true;
   }
 
@@ -2998,7 +3017,12 @@
     sendBtn.disabled = (conversationMode === 'image');
     sendImgBtn.disabled = (conversationMode === 'chat');
     attachBtn.disabled = (conversationMode === 'image');
-    promptInput.disabled = false; promptInput.value = ''; autoGrow();
+    /* Do NOT clear the textarea here. Both send paths clear it at submit
+     * time, so anything present now was TYPED DURING the turn as the next
+     * message. Wiping it would destroy the draft the moment streaming ends
+     * (or the user hits stop). Re-measure the height for whatever survived. */
+    promptInput.disabled = false;
+    autoGrow();
   }
 
   function addRetryButton(contentEl, onRetry) {
@@ -3984,31 +4008,43 @@
              * OpenAI-compatible providers use reasoning. Accept both. */
             const thinkChunk = delta.reasoning_content || delta.reasoning;
             if (thinkChunk) {
-              const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
-              if (thinkEl) {
-                if (thinkEl.style.display === 'none') {
-                  /* First reasoning delta of this round: clamp the tail
-                   * to the viewport (minus the "Thinking..." line and
-                   * breathing room) so the message can never grow the
-                   * document and push the screen around. */
-                  thinkEl.style.display = 'block';
-                  thinkEl.style.maxHeight = Math.max(120, conversationWrap.clientHeight - 80) + 'px';
-                  thinkEl.textContent = '';
-                }
-                thinkText += thinkChunk;
-                renderThinkingThrottled(thinkEl, thinkText);
+              const msgEl = contentEl.parentElement;
+              let thinkEl = msgEl.querySelector('.thinking-scroll');
+              /* A prior round's first final-answer token REMOVED the tail
+               * (see below). If this round streams reasoning again, re-mount
+               * a fresh one under the response div. */
+              if (!thinkEl) {
+                thinkEl = document.createElement('div');
+                thinkEl.className = 'thinking-scroll';
+                msgEl.appendChild(thinkEl);
               }
+              if (thinkEl.style.display === 'none' || !thinkEl.style.maxHeight) {
+                /* First reasoning delta of this round: clamp the tail
+                 * to the viewport (minus the "Thinking..." line and
+                 * breathing room) so the message can never grow the
+                 * document and push the screen around. */
+                thinkEl.style.display = 'block';
+                thinkEl.style.maxHeight = Math.max(120, conversationWrap.clientHeight - 80) + 'px';
+                thinkEl.textContent = '';
+              }
+              thinkText += thinkChunk;
+              renderThinkingThrottled(thinkEl, thinkText);
             }
             if (delta.content) {
               if (!live.text) {
                 /* First final-answer token: retire the thinking tail
-                 * (display:none, NOT removal -- a later tool-loop round
-                 * may stream reasoning again). The placeholder
-                 * "Thinking..." line is replaced by the answer in this
-                 * same frame. */
+                 * COMPLETELY (removal, not display:none) so no residual
+                 * reasoning is left composited under the answer while the
+                 * reply streams. The placeholder "Thinking..." line is
+                 * replaced by the answer in this same frame. (A later
+                 * tool-loop round re-mounts a fresh tail if reasoning
+                 * streams again -- see the display toggle below.) */
                 const thinkEl = contentEl.parentElement.querySelector('.thinking-scroll');
-                if (thinkEl) { thinkEl.style.display = 'none'; thinkEl.textContent = ''; }
+                if (thinkEl) thinkEl.remove();
                 contentEl.classList.remove('placeholder');
+                /* Re-anchor AFTER the answer's first render so the reply
+                 * starts flush at the top with the thinking tail gone,
+                 * rather than one frame of overlap. */
                 alignAssistantToTop(contentEl.parentElement);
               }
               live.text += delta.content;
@@ -4239,10 +4275,10 @@
     }
   }
 
-  /* Retires the reasoning tail. Removal (not display:none) here because these
-   * call sites mean the turn is OVER -- no further rounds will stream. The
-   * first-final-answer-token transition inside the SSE loop uses display:none
-   * instead, because a tool-loop round may re-show the element later. */
+  /* Retires the reasoning tail. Both this and the first-final-answer-token
+   * transition inside the SSE loop use removal (not display:none), so a
+   * finished turn leaves no residual reasoning node behind; a later
+   * tool-loop round re-mounts a fresh tail if reasoning streams again. */
   function dismissThinking(contentEl) {
     contentEl?.parentElement?.querySelector('.thinking-scroll')?.remove();
   }
