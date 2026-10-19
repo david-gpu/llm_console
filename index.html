@@ -7,11 +7,17 @@
 <!--
     OVERARCHING PHILOSOPHY
     
-    This is a simple vibe-coded retrogrouch LLM web client.
-    
-    It is meant to warm the hearts of those graybeards that miss the aesthetics of late-80s CGA consoles.
-    Don't take it seriously. It's just a fun little project to scratch a few itches I had when using
-    corporate LLM clients.
+    This is a simple vibe-coded LLM web client with two selectable interfaces.
+
+    "Retrogrouch" is the original look: it is meant to warm the hearts of those graybeards that miss
+    the aesthetics of late-80s CGA consoles. "McModern" is an architectural reskin of the same app in
+    the vocabulary of contemporary "Modern Infill" single-family homes: flat roofs, boxy white masses,
+    large glazing, high-contrast neutrals, and dark vertical wood. Don't take it seriously. It's just a
+    fun little project to scratch a few itches I had when using corporate LLM clients.
+
+    The interface is picked in Settings ("Interface") and stored in the config. ONLY CSS differs
+    between the two: the choice is a single `data-interface` attribute on <html> and the stylesheet
+    keys every theme off it. The DOM and all JS behavior are identical.
 
     Dear AI assistants editing this: the comments are meant to be some sort of a loose specification,
     to give you an idea of *why* the code is the way it is. Please don't edit or remove the comments
@@ -68,7 +74,14 @@
   const CONFIG_KEY = 'llm-console-config';
   const HISTORY_PREFIX = 'llm-console-history-';
 
+  /* The two selectable looks. Only CSS differs between them: the interface is
+   * a single `data-interface` attribute on <html> that the stylesheet keys off.
+   * "retrogrouch" is the original CRT/phosphor skin and the default; "mcmodern"
+   * is the neutral, architectural skin. */
+  const INTERFACES = ['retrogrouch', 'mcmodern'];
+
   const DEFAULT_CONFIG = {
+    interfaceStyle:  "retrogrouch",
     apiKey:          "",
     apiHost:         "https://api.deepinfra.com",
     apiPath:         "v1/openai/chat/completions",
@@ -96,6 +109,53 @@
    * cells, exactly like a character-cell ASCII drawing. */
   const ROBOT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 32" width="300" height="320" shape-rendering="crispEdges">
 <path fill="#2BE060" d="M4 14h21v1h-21ZM4 26h21v1h-21ZM6 19h7v1h-7ZM16 22h7v1h-7ZM13 3h1v6h-1ZM15 3h1v6h-1ZM5 10h6v1h-6ZM18 10h6v1h-6ZM3 15h1v6h-1ZM25 15h1v6h-1ZM17 19h6v1h-6ZM6 22h6v1h-6ZM12 10h5v1h-5ZM12 12h5v1h-5ZM2 27h5v1h-5ZM22 27h5v1h-5ZM2 29h5v1h-5ZM22 29h5v1h-5ZM2 31h5v1h-5ZM22 31h5v1h-5ZM3 22h1v4h-1ZM25 22h1v4h-1ZM11 2h3v1h-3ZM15 2h3v1h-3ZM8 3h3v1h-3ZM18 3h3v1h-3ZM6 4h3v1h-3ZM20 4h3v1h-3ZM8 6h3v1h-3ZM18 6h3v1h-3ZM4 7h1v3h-1ZM24 7h1v3h-1ZM4 21h3v1h-3ZM22 21h3v1h-3ZM5 5h2v1h-2ZM22 5h2v1h-2ZM4 6h2v1h-2ZM23 6h2v1h-2ZM11 8h2v1h-2ZM16 8h2v1h-2ZM10 9h2v1h-2ZM17 9h2v1h-2ZM12 15h2v1h-2ZM15 15h2v1h-2ZM4 16h1v2h-1ZM5 17h1v2h-1ZM23 17h2v1h-2ZM22 18h2v1h-2ZM12 20h1v2h-1ZM16 20h1v2h-1ZM8 7h1v1h-1ZM10 7h1v1h-1ZM18 7h1v1h-1ZM20 7h1v1h-1ZM5 9h1v1h-1ZM23 9h1v1h-1ZM14 16h1v1h-1ZM6 18h1v1h-1ZM4 20h1v1h-1ZM6 20h1v1h-1ZM22 20h1v1h-1ZM24 20h1v1h-1ZM2 23h1v1h-1ZM26 23h1v1h-1ZM2 25h1v1h-1ZM26 25h1v1h-1Z"/>
+ </svg>`;
+
+  /* McModern empty-state mark: a boxy robot built from the same architectural
+   * vocabulary as the McModern interface. Large flat-roofed head and body
+   * masses, two big glazed eyes divided by a vertical wood mullion, a thin
+   * glass-railing collar, a small glazed chest, and stubby feet. Same 30x32
+   * grid and viewBox as the Retrogrouch robot so the splash keeps its
+   * footprint. Structural strokes use `currentColor` (inheriting the theme's
+   * text token); the only fixed hues are the dark wood and glazing, which are
+   * McModern's own material palette. */
+  const MC_MODERN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 32" width="300" height="320" shape-rendering="crispEdges">
+<!-- antenna fin -->
+<rect x="14.6" y="0.4" width="0.8" height="1.6" fill="currentColor"/>
+<rect x="13" y="0" width="4" height="0.8" fill="currentColor"/>
+<!-- head: flat-roofed white box -->
+<rect x="5" y="2" width="20" height="1.4" fill="currentColor"/>
+<rect x="5" y="3.4" width="1" height="9.6" fill="currentColor"/>
+<rect x="24" y="3.4" width="1" height="9.6" fill="currentColor"/>
+<rect x="5" y="13" width="20" height="1" fill="currentColor"/>
+<!-- two glazed eyes, split by a vertical wood mullion -->
+<rect x="7" y="4.5" width="7" height="7.5" fill="#8FB3C9"/>
+<rect x="16" y="4.5" width="7" height="7.5" fill="#8FB3C9"/>
+<rect x="7" y="4.5" width="7" height="7.5" fill="none" stroke="currentColor" stroke-width="0.7"/>
+<rect x="16" y="4.5" width="7" height="7.5" fill="none" stroke="currentColor" stroke-width="0.7"/>
+<rect x="14" y="4.5" width="2" height="7.5" fill="#5A3E2B"/>
+<!-- neck -->
+<rect x="11" y="14" width="8" height="2.2" fill="currentColor"/>
+<!-- glass-railing collar -->
+<rect x="4" y="16" width="22" height="0.7" fill="currentColor" opacity="0.55"/>
+<rect x="4" y="16" width="0.7" height="2" fill="currentColor" opacity="0.55"/>
+<rect x="25.3" y="16" width="0.7" height="2" fill="currentColor" opacity="0.55"/>
+<!-- body: wide flat-roofed mass -->
+<rect x="3" y="18" width="24" height="1.4" fill="currentColor"/>
+<rect x="3" y="19.4" width="1" height="8.6" fill="currentColor"/>
+<rect x="26" y="19.4" width="1" height="8.6" fill="currentColor"/>
+<rect x="3" y="28" width="24" height="1" fill="currentColor"/>
+<!-- chest: glazed window + vertical wood fin -->
+<rect x="6" y="20.5" width="6" height="6.5" fill="#5A3E2B"/>
+<rect x="7.4" y="20.5" width="0.6" height="6.5" fill="#7A5638"/>
+<rect x="9.2" y="20.5" width="0.6" height="6.5" fill="#7A5638"/>
+<rect x="14" y="20.5" width="10" height="6.5" fill="#8FB3C9"/>
+<rect x="14" y="20.5" width="10" height="6.5" fill="none" stroke="currentColor" stroke-width="0.7"/>
+<rect x="18.7" y="20.5" width="0.6" height="6.5" fill="currentColor"/>
+<rect x="14" y="23.4" width="10" height="0.6" fill="currentColor"/>
+<!-- feet -->
+<rect x="4" y="29" width="6" height="2.2" fill="currentColor"/>
+<rect x="20" y="29" width="6" height="2.2" fill="currentColor"/>
 </svg>`;
 
   function loadConfig() {
@@ -151,6 +211,36 @@
     localStorage.setItem(HISTORY_PREFIX + key, JSON.stringify(list));
   }
 
+  /**
+   * Coerces a stored/supplied interface name to one of INTERFACES, falling back
+   * to the default. Guards against hand-edited localStorage or stale configs.
+   */
+  function normalizeInterface(style) {
+    return INTERFACES.includes(style) ? style : DEFAULT_CONFIG.interfaceStyle;
+  }
+
+  /**
+   * Applies an interface by setting `data-interface` on <html>. All theme CSS
+   * hangs off that attribute, so switching interfaces never touches the DOM
+   * structure or any JS behavior.
+   */
+  function applyInterface(style) {
+    document.documentElement.dataset.interface = normalizeInterface(style);
+  }
+
+  /* Paint the stored interface as early as possible (this script runs in
+   * <head>, before <body> is parsed) so McModern users never see a flash of
+   * the default Retrogrouch skin. Deliberately does NOT normalize above: we
+   * only need the attribute to be valid, and a missing/corrupt config simply
+   * leaves the CSS default in place. */
+  try {
+    const earlyRaw = localStorage.getItem(CONFIG_KEY);
+    const earlyInterface = earlyRaw && JSON.parse(earlyRaw).interfaceStyle;
+    if (INTERFACES.includes(earlyInterface)) {
+      document.documentElement.dataset.interface = earlyInterface;
+    }
+  } catch (e) { /* default interface from :root stands */ }
+
   /* Pure string escaper. Covers the full HTML-sensitive set INCLUDING single
    * and double quotes: harmless in element-content contexts, and required
    * the moment an escaped value is ever interpolated into an attribute
@@ -201,15 +291,30 @@
    * There is NO neutral border/gray color: every structural line is the -dim
    * phosphor of the space it lives in, exactly like a real monochrome CRT.
    *
+   * INTERFACE THEMES:
+   * The rules below never name a phosphor color directly. They consume the
+   * ROLE TOKENS (--user-fg, --system-surface, --line, ...), which are defined
+   * once per interface and selected by `html[data-interface="..."]`:
+   *   retrogrouch : the original phosphor palette above (default).
+   *   mcmodern    : neutral architectural palette (off-white / charcoal /
+   *                 dark wood), no CRT effects, sans UI + monospace code.
+   * The phosphor values are therefore the Retrogrouch implementation of the
+   * role layer, NOT a rule-level palette. Only CSS differs between interfaces;
+   * the DOM and all JS behavior are identical.
+   *
    * TYPOGRAPHY & SIZING:
-   * Single unified monospace typeface (--font-term) across standard text, inputs, 
-   * headers, and code blocks. Base text size set to 19px.
+   * Two typeface roles: --font-ui for chrome and prose, --font-code for code.
+   * Retrogrouch sets both to the terminal monospace (--font-term) and uses a
+   * 19px base; McModern uses a sans-serif UI with monospace code at 17px.
    * ==========================================================================
    */
 
   :root {
     --bg:               #080C08;
     
+    /* Retrogrouch primitives. Rules must not use these directly -- they go
+     * through the role tokens below, so a second interface only has to
+     * redefine the roles. */
     --amber-phosphor:   #FFAE1A;
     --amber-dim:        #7A520B;
     --amber-panel:      #1A1206;
@@ -217,14 +322,167 @@
     --green-dim:        #13632B;
     --green-panel:      #0F150F;
     --red-phosphor:     #FF4A4A;
-    
+
+    /* ROLE TOKENS (Retrogrouch values). */
+    --user-fg:          var(--amber-phosphor);  /* user-input text/icons */
+    --user-dim:         var(--amber-dim);       /* dim user controls & lines */
+    --user-surface:     var(--amber-panel);     /* user-side panel surfaces */
+    --system-fg:        var(--green-phosphor);  /* system/assistant text */
+    --system-dim:       var(--green-dim);       /* system lines/telemetry */
+    --system-surface:   var(--green-panel);     /* system panels/dropdowns */
+    --alert-fg:         var(--red-phosphor);    /* errors/aborts */
+    /* Foreground used when a filled control inverts (text on --user-fg etc). */
+    --on-user:          var(--bg);
+    --on-system:        var(--bg);
+    --on-alert:         var(--bg);
+    /* Surfaces of effects that are not simple fills. */
+    --shadow-panel:     0 6px 18px rgba(0, 0, 0, 0.6);
+    --shadow-overlay:   0 0 24px rgba(0, 0, 0, 0.6);
+    --system-tint:      rgba(43, 224, 96, 0.05);
+    --overlay-bg:       rgba(8, 12, 8, 0.95);
+    --focus-glow:       0 0 6px rgba(255, 174, 26, 0.4);
+
     --font-term:        "Courier New", Courier, "Liberation Mono", VT323, Consolas, monospace;
+    --font-ui:          var(--font-term);
+    --font-code:        var(--font-term);
     --font-size-base:   19px;
     /* Textarea auto-grow clamp bounds: the single source of truth for the
      * input box geometry. autoGrow() reads these back via getComputedStyle,
      * so the JS clamp can never drift out of sync with the CSS. */
     --input-min-h:      86px;
     --input-max-h:      240px;
+  }
+
+  /* ==========================================================================
+   * INTERFACE: McMODERN
+   * ==========================================================================
+   * An architectural reskin of the same app: flat masses, large glazing,
+   * high-contrast neutrals, dark vertical wood, and minimal glass rails.
+   * Retrogrouch = the CRT phosphor family; McModern = off-white / charcoal /
+   * dark wood. Everything below only changes tokens and decoration -- never
+   * layout, spacing, flex, or the input-bar geometry that autoGrow() and
+   * setInputBarHiddenPx() measure.
+   *
+   * Contrast note: charcoal text on off-white and white on charcoal both
+   * clear WCAG AA (>= 4.5:1) for body size.
+   * ========================================================================== */
+  html[data-interface="mcmodern"] {
+    --bg:               #F4F1EA;   /* off-white stucco */
+    --user-fg:          #1E1E1E;   /* charcoal */
+    --user-dim:         #6E6A63;   /* muted stone */
+    --user-surface:     #FFFFFF;   /* white box */
+    --system-fg:        #2A2A2A;   /* charcoal text */
+    --system-dim:       #C9C3B8;   /* light structural line */
+    --system-surface:   #FFFFFF;   /* opaque fallback (see @supports below) */
+    --alert-fg:         #B3261E;
+    --on-user:          #F4F1EA;
+    --on-system:        #F4F1EA;
+    --on-alert:         #F4F1EA;
+    --shadow-panel:     0 10px 30px rgba(20, 20, 20, 0.12);
+    --shadow-overlay:   0 18px 50px rgba(20, 20, 20, 0.18);
+    --system-tint:      rgba(30, 30, 30, 0.04);
+    --overlay-bg:       rgba(24, 24, 24, 0.86);
+    --focus-glow:       none;
+
+    --font-ui:          system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-code:        ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --font-size-base:   17px;
+  }
+
+  /* GLASS RAILINGS: system panels become glazed slabs over the off-white
+   * background. The opaque --system-surface above is the fallback; only where
+   * backdrop-filter is supported do we make the surface translucent. */
+  @supports (backdrop-filter: blur(1px)) {
+    html[data-interface="mcmodern"] {
+      --system-surface: rgba(255, 255, 255, 0.72);
+    }
+  }
+
+  /* No CRT on the McModern build: kill the scanline/RGB/vignette overlay and
+   * the warm-up glow animation (which would smear text-shadow onto flat type). */
+  html[data-interface="mcmodern"] .crt-overlay {
+    display: none;
+  }
+
+  html[data-interface="mcmodern"] .crt-screen-content {
+    animation: none;
+  }
+
+  /* BOXY MASSES: crisp 2px charcoal edges read as flat volumetric slabs
+   * rather than glow lines. Borders only -- no padding/geometry change.
+   * (.inputbar is handled separately below so its wood stripe and frame can
+   * share the left edge.) */
+  html[data-interface="mcmodern"] .statusbar,
+  html[data-interface="mcmodern"] .settings-form,
+  html[data-interface="mcmodern"] .model-dropdown,
+  html[data-interface="mcmodern"] .history-dropdown {
+    border: 2px solid var(--user-fg);
+  }
+
+  /* Large windows: the conversation sits in a white box against the off-white
+   * ground, like a glazed volume against stucco. */
+  html[data-interface="mcmodern"] .conversation-wrap {
+    background: #FFFFFF;
+    border-left: 2px solid var(--user-fg);
+    border-right: 2px solid var(--user-fg);
+  }
+
+  /* VERTICAL WOOD: a dark-wood fin on the input side. The left border itself
+   * IS the wood (a wood-toned fin between two charcoal hairlines), which needs
+   * no pseudo-element and cannot misalign with the frame. Border width, not
+   * padding, is safe for the geometry: autoGrow() measures the TEXTAREA, and
+   * setInputBarHiddenPx() re-reads inputbar.offsetHeight at call time. */
+  html[data-interface="mcmodern"] .inputbar {
+    position: relative;
+    border: 2px solid var(--user-fg);
+    border-left: 8px solid #5A3E2B;
+    box-shadow: inset 2px 0 0 #5A3E2B;
+  }
+
+  /* Glass: panels that floated over the CRT now float over light ground, so
+   * their drop shadows soften and the panels glaze. */
+  html[data-interface="mcmodern"] .statusbar {
+    -webkit-backdrop-filter: blur(14px) saturate(1.1);
+    backdrop-filter: blur(14px) saturate(1.1);
+  }
+
+  /* SETTINGS AS A WHITE BOX: the form becomes the white mass, its header a
+   * charcoal band (dark wood against stucco), and the fields read as
+   * recessed off-white slots with crisp charcoal hairlines. */
+  html[data-interface="mcmodern"] .settings-form {
+    background: #FFFFFF;
+    border-left: none;
+    border-right: none;
+  }
+
+  html[data-interface="mcmodern"] .settings-header {
+    background: var(--user-fg);
+    color: var(--on-user);
+    border-bottom: none;
+    border-left: 6px solid #5A3E2B;
+  }
+
+  html[data-interface="mcmodern"] .settings-body input,
+  html[data-interface="mcmodern"] .settings-body select,
+  html[data-interface="mcmodern"] .settings-body textarea,
+  html[data-interface="mcmodern"] .history-toggle-btn,
+  html[data-interface="mcmodern"] .copy-key-btn {
+    background: var(--bg);
+    border-color: var(--system-dim);
+  }
+
+  /* Focus is a charcoal hairline (no glow); the border width is left alone so
+   * the field cannot shift the fixed-height history/copy buttons beside it. */
+  html[data-interface="mcmodern"] .settings-body input:focus-visible,
+  html[data-interface="mcmodern"] .settings-body select:focus-visible,
+  html[data-interface="mcmodern"] .settings-body textarea:focus-visible {
+    border-color: var(--user-fg);
+  }
+
+  /* Telemetry blocks: a thin charcoal rail instead of a glowing green stripe. */
+  html[data-interface="mcmodern"] .tool-status-msg {
+    border-left-color: var(--user-fg);
+    background: var(--system-tint);
   }
 
   * {
@@ -235,8 +493,8 @@
     height: 100%;
     margin: 0;
     background: var(--bg);
-    color: var(--green-phosphor);
-    font-family: var(--font-term);
+    color: var(--system-fg);
+    font-family: var(--font-ui);
     font-size: var(--font-size-base);
     line-height: 1.45;
     -webkit-tap-highlight-color: transparent;
@@ -312,22 +570,34 @@
     }
   }
 
-  /* REUSED TAXONOMY UTILITIES */
-  .term-font { 
-    font-family: var(--font-term) !important; 
+  /* REUSED TAXONOMY UTILITIES.
+   * `.term-font` is the UI face role (Retrogrouch: the terminal monospace;
+   * McModern: sans-serif). Code surfaces additionally get `.mono-font`,
+   * which pins --font-code with equal specificity -- the !important on both
+   * keeps them ahead of the element/class font rules further down. */
+  .term-font, 
+  .mono-font {
     font-size: var(--font-size-base) !important; 
   }
 
+  .term-font { 
+    font-family: var(--font-ui) !important; 
+  }
+
+  .mono-font {
+    font-family: var(--font-code) !important;
+  }
+
   .amber-txt { 
-    color: var(--amber-phosphor) !important; 
+    color: var(--user-fg) !important; 
   }
 
   .green-txt { 
-    color: var(--green-phosphor) !important; 
+    color: var(--system-fg) !important; 
   }
 
   .red-txt { 
-    color: var(--red-phosphor) !important; 
+    color: var(--alert-fg) !important; 
     text-align: left !important; 
   }
 
@@ -338,7 +608,7 @@
    * already-dim amber. */
   input::placeholder,
   textarea::placeholder {
-    color: var(--amber-dim);
+    color: var(--user-dim);
     opacity: 1;
   }
 
@@ -346,8 +616,8 @@
   .statusbar {
     flex: 0 0 auto;
     padding: 8px 14px;
-    background: var(--green-panel);
-    border-bottom: 1px solid var(--green-dim);
+    background: var(--system-surface);
+    border-bottom: 1px solid var(--system-dim);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -387,14 +657,14 @@
     max-width: calc(100vw - 16px);
     max-height: 50vh;
     overflow-y: auto;
-    background: var(--green-panel);
-    border: 1px solid var(--green-dim);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+    background: var(--system-surface);
+    border: 1px solid var(--system-dim);
+    box-shadow: var(--shadow-panel);
   }
 
   .model-dropdown .history-item {
-    color: var(--green-phosphor);
-    border-bottom: 1px solid var(--green-dim);
+    color: var(--system-fg);
+    border-bottom: 1px solid var(--system-dim);
     font-size: 0.85em;
     word-break: break-all;
   }
@@ -404,8 +674,8 @@
   }
 
   .model-dropdown .history-item:hover {
-    background: var(--green-phosphor);
-    color: var(--bg);
+    background: var(--system-fg);
+    color: var(--on-system);
   }
 
   /* MAIN CONVERSATION CONTAINER */
@@ -444,7 +714,7 @@
     overflow-y: hidden;
     white-space: pre-wrap;
     word-wrap: break-word;
-    color: var(--green-dim);
+    color: var(--system-dim);
     font-size: 0.85em;
     line-height: 1.45;
     text-align: left;
@@ -471,16 +741,46 @@
     padding: 20px;
   }
 
+  /* The mark now lives in a per-interface wrapper span so exactly one svg is
+   * shown; the bottom margin moves to the wrapper, otherwise it would collapse
+   * inside the span instead of separating the art from the title. */
+  .empty-splash .splash-art {
+    display: block;
+    max-width: 100%;
+    margin-bottom: 14px;
+  }
+
   .empty-splash svg {
     width: min(360px, 100%); /* shrink instead of overflowing on mobile */
     max-width: 100%;
     height: auto; /* preserve the robot's 30:32 viewBox aspect ratio */
-    margin-bottom: 14px;
+    display: block;
+    margin: 0 auto;
+  }
+
+  /* Exactly one splash mark per interface. Both are emitted by
+   * checkEmptyState(); Retrogrouch (the default) shows the robot. */
+  .empty-splash .splash-art-mcmodern {
+    display: none;
+  }
+
+  html[data-interface="mcmodern"] .empty-splash .splash-art-retrogrouch {
+    display: none;
+  }
+
+  html[data-interface="mcmodern"] .empty-splash .splash-art-mcmodern {
+    display: block;
+  }
+
+  /* The McModern mark carries its own material colors; it needs the full
+   * content color for its structural strokes. */
+  html[data-interface="mcmodern"] .empty-splash svg {
+    color: var(--system-fg);
   }
 
   .empty-splash .splash-title {
     font-size: 0.9em;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
     letter-spacing: 0.12em;
   }
 
@@ -521,11 +821,11 @@
   .edit-prompt-btn {
     align-self: flex-start;
     background: transparent;
-    border: 1px solid var(--amber-phosphor);
-    color: var(--amber-phosphor);
+    border: 1px solid var(--user-fg);
+    color: var(--user-fg);
     border-radius: 2px;
     padding: 3px 8px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     font-size: 0.8em;
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
@@ -536,14 +836,14 @@
   }
 
   .edit-prompt-btn:hover {
-    background: var(--amber-phosphor);
-    color: var(--bg);
+    background: var(--user-fg);
+    color: var(--on-user);
   }
 
   .message.assistant {
     align-self: flex-start;
     width: 100%;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
     text-align: left;
   }
 
@@ -551,17 +851,17 @@
   .tool-status-msg {
     margin: 8px 0;
     padding: 6px 10px;
-    border-left: 2px solid var(--green-phosphor);
-    background: rgba(43, 224, 96, 0.05);
+    border-left: 2px solid var(--system-fg);
+    background: var(--system-tint);
     font-size: var(--font-size-base);
     text-align: left;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
   }
 
   /* SYSTEM ERROR AND ABORT NOTIFICATIONS (< ERROR >) */
   .error-msg-text {
-    color: var(--red-phosphor) !important;
-    font-family: var(--font-term) !important;
+    color: var(--alert-fg) !important;
+    font-family: var(--font-ui) !important;
     font-size: var(--font-size-base) !important;
     text-align: left !important;
     margin-top: 8px;
@@ -615,8 +915,8 @@
    * single px value so they always stay in lockstep with the drag. */
   .inputbar {
     flex: 0 0 auto;
-    border-top: 1px solid var(--amber-dim);
-    background: var(--amber-panel);
+    border-top: 1px solid var(--user-dim);
+    background: var(--user-surface);
     padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
     display: flex;
     align-items: flex-end;
@@ -648,7 +948,7 @@
     flex: 0 0 auto;
     padding-top: 8px;
     font-weight: bold;
-    color: var(--amber-phosphor);
+    color: var(--user-fg);
   }
 
   textarea#promptInput {
@@ -657,11 +957,11 @@
     width: 100%;
     resize: vertical;
     background: var(--bg);
-    color: var(--amber-phosphor);
-    border: 1px solid var(--amber-phosphor);
+    color: var(--user-fg);
+    border: 1px solid var(--user-fg);
     border-radius: 2px;
     padding: 8px 10px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     font-size: var(--font-size-base);
     line-height: 1.45;
     min-height: var(--input-min-h);
@@ -671,8 +971,8 @@
 
   textarea#promptInput:focus-visible {
     outline: none;
-    border-color: var(--amber-phosphor);
-    box-shadow: 0 0 6px rgba(255, 174, 26, 0.4);
+    border-color: var(--user-fg);
+    box-shadow: var(--focus-glow);
   }
 
   .action-stack {
@@ -692,11 +992,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--amber-panel);
-    border: 1px solid var(--amber-phosphor);
-    color: var(--amber-phosphor);
+    background: var(--user-surface);
+    border: 1px solid var(--user-fg);
+    color: var(--user-fg);
     border-radius: 2px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
@@ -717,14 +1017,14 @@
     .gear-btn:hover,
     button.send:not(:disabled):hover,
     button.send-img:not(:disabled):hover {
-      background: var(--amber-phosphor);
-      color: var(--bg);
+      background: var(--user-fg);
+      color: var(--on-user);
     }
 
     button.send.stop:not(:disabled):hover,
     button.send-img.stop:not(:disabled):hover {
-      background: var(--red-phosphor);
-      color: var(--bg);
+      background: var(--alert-fg);
+      color: var(--on-alert);
     }
   }
 
@@ -742,21 +1042,21 @@
     .gear-btn:hover,
     button.send:not(:disabled):hover,
     button.send-img:not(:disabled):hover {
-      background: var(--amber-panel);
-      color: var(--amber-phosphor);
+      background: var(--user-surface);
+      color: var(--user-fg);
     }
 
     button.send.stop:not(:disabled):hover,
     button.send-img.stop:not(:disabled):hover {
-      background: var(--amber-panel);
-      color: var(--red-phosphor);
+      background: var(--user-surface);
+      color: var(--alert-fg);
     }
 
     /* While files ARE still pending, hover must keep showing the active
      * highlight, not the neutralized resting look. */
     .attach-btn.active:hover {
-      background: var(--amber-phosphor);
-      color: var(--bg);
+      background: var(--user-fg);
+      color: var(--on-user);
     }
   }
 
@@ -764,43 +1064,43 @@
    * a highlighted button instead of listing filenames, which tend to eat
    * up the whole input row. Tapping again while active clears them. */
   .attach-btn.active {
-    background: var(--amber-phosphor);
-    color: var(--bg);
+    background: var(--user-fg);
+    color: var(--on-user);
   }
 
   button.send:disabled,
   button.send-img:disabled,
   .attach-btn:disabled {
-    color: var(--amber-dim);
-    border-color: var(--amber-dim);
+    color: var(--user-dim);
+    border-color: var(--user-dim);
     opacity: 0.7;
     cursor: not-allowed;
   }
 
   button.send.stop,
   button.send-img.stop {
-    color: var(--red-phosphor);
-    border-color: var(--red-phosphor);
+    color: var(--alert-fg);
+    border-color: var(--alert-fg);
   }
 
   .img-thumbnail {
     max-height: 240px;
     max-width: 100%;
     border-radius: 2px;
-    border: 1px solid var(--green-dim);
+    border: 1px solid var(--system-dim);
     cursor: pointer;
     transition: border-color 0.15s;
     object-fit: contain;
   }
 
   .img-thumbnail:hover {
-    border-color: var(--green-phosphor);
+    border-color: var(--system-fg);
   }
 
   .lightbox-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(8, 12, 8, 0.95);
+    background: var(--overlay-bg);
     z-index: 5000;
     display: flex;
     align-items: center;
@@ -812,7 +1112,7 @@
   .lightbox-img {
     max-width: 95vw;
     max-height: 95vh;
-    border: 1px solid var(--green-phosphor);
+    border: 1px solid var(--system-fg);
     object-fit: contain;
   }
 
@@ -820,7 +1120,7 @@
     position: absolute;
     top: 16px;
     right: 24px;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
     cursor: pointer;
     z-index: 5001;
   }
@@ -833,18 +1133,18 @@
     margin: 8px 0 0;
     padding: 4px 10px;
     background: transparent;
-    border: 1px solid var(--green-phosphor);
-    color: var(--green-phosphor);
+    border: 1px solid var(--system-fg);
+    color: var(--system-fg);
     border-radius: 2px;
     font-size: 0.8em;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
 
   .retry-btn:hover {
-    background: var(--green-phosphor);
-    color: var(--bg);
+    background: var(--system-fg);
+    color: var(--on-system);
   }
 
   /* READ-ALOUD (TTS) BUTTON. Sits inline next to the retry button (added
@@ -863,28 +1163,28 @@
     margin: 8px 0 0 6px;
     padding: 4px 10px;
     background: transparent;
-    border: 1px solid var(--green-phosphor);
-    color: var(--green-phosphor);
+    border: 1px solid var(--system-fg);
+    color: var(--system-fg);
     border-radius: 2px;
     font-size: 0.8em;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     cursor: pointer;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
   }
 
   .speak-btn:hover {
-    background: var(--green-phosphor);
-    color: var(--bg);
+    background: var(--system-fg);
+    color: var(--on-system);
   }
 
   .speak-btn.playing {
-    color: var(--red-phosphor);
-    border-color: var(--red-phosphor);
+    color: var(--alert-fg);
+    border-color: var(--alert-fg);
   }
 
   .speak-btn.playing:hover {
-    background: var(--red-phosphor);
-    color: var(--bg);
+    background: var(--alert-fg);
+    color: var(--on-alert);
   }
 
   .speak-btn.busy {
@@ -924,18 +1224,18 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
-    border-left: 1px solid var(--amber-dim);
-    border-right: 1px solid var(--amber-dim);
+    border-left: 1px solid var(--user-dim);
+    border-right: 1px solid var(--user-dim);
     margin: 0 auto;
-    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-overlay);
   }
 
   .settings-header {
     flex: 0 0 auto;
     padding: 10px 14px;
-    background: var(--amber-panel);
-    border-bottom: 1px solid var(--amber-phosphor);
-    color: var(--amber-phosphor);
+    background: var(--user-surface);
+    border-bottom: 1px solid var(--user-fg);
+    color: var(--user-fg);
     font-size: var(--font-size-base);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -960,7 +1260,7 @@
     font-size: 0.75em;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--amber-phosphor);
+    color: var(--user-fg);
   }
 
   .settings-body input,
@@ -968,11 +1268,11 @@
   .settings-body textarea {
     width: 100%;
     background: var(--bg);
-    color: var(--amber-phosphor);
-    border: 1px solid var(--amber-dim);
+    color: var(--user-fg);
+    border: 1px solid var(--user-dim);
     border-radius: 2px;
     padding: 8px 10px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     font-size: var(--font-size-base);
   }
 
@@ -980,8 +1280,8 @@
   .settings-body select:focus-visible,
   .settings-body textarea:focus-visible {
     outline: none;
-    border-color: var(--amber-phosphor);
-    box-shadow: 0 0 6px rgba(255, 174, 26, 0.4);
+    border-color: var(--user-fg);
+    box-shadow: var(--focus-glow);
   }
 
   .field-history-wrap,
@@ -1003,9 +1303,9 @@
     height: 41px;
     padding: 0 10px;
     background: var(--bg);
-    border: 1px solid var(--amber-dim);
+    border: 1px solid var(--user-dim);
     border-left: none;
-    color: var(--amber-phosphor);
+    color: var(--user-fg);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -1014,8 +1314,8 @@
 
   .history-toggle-btn:hover,
   .copy-key-btn:hover {
-    background: var(--amber-dim);
-    border-color: var(--amber-phosphor);
+    background: var(--user-dim);
+    border-color: var(--user-fg);
   }
 
   .history-dropdown {
@@ -1024,8 +1324,8 @@
     left: 0;
     right: 0;
     z-index: 100;
-    background: var(--amber-panel);
-    border: 1px solid var(--amber-phosphor);
+    background: var(--user-surface);
+    border: 1px solid var(--user-fg);
     max-height: 180px;
     overflow-y: auto;
     margin-top: 2px;
@@ -1038,31 +1338,31 @@
     padding: 8px 10px;
     font-size: 0.85em;
     cursor: pointer;
-    border-bottom: 1px solid var(--amber-dim);
+    border-bottom: 1px solid var(--user-dim);
   }
 
   .history-item:hover {
-    background: var(--amber-phosphor);
-    color: var(--bg);
+    background: var(--user-fg);
+    color: var(--on-user);
   }
 
   .history-item-del {
     background: transparent;
     border: none;
-    color: var(--amber-phosphor);
+    color: var(--user-fg);
     cursor: pointer;
     padding: 2px 6px;
   }
 
   .history-item:hover .history-item-del {
-    color: var(--red-phosphor);
+    color: var(--alert-fg);
   }
 
   .settings-footer {
     flex: 0 0 auto;
     padding: 12px 14px;
-    background: var(--amber-panel);
-    border-top: 1px solid var(--amber-dim);
+    background: var(--user-surface);
+    border-top: 1px solid var(--user-dim);
     display: flex;
     gap: 10px;
   }
@@ -1072,11 +1372,11 @@
    * the gap) is split 50/50 regardless of each button's label length. */
   .settings-footer button.primary {
     flex: 1 1 0;
-    background: var(--amber-phosphor);
-    color: var(--bg);
-    border: 1px solid var(--amber-phosphor);
+    background: var(--user-fg);
+    color: var(--on-user);
+    border: 1px solid var(--user-fg);
     padding: 10px 14px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     font-size: 0.85em;
     text-transform: uppercase;
     cursor: pointer;
@@ -1085,31 +1385,31 @@
 
   .settings-footer button.primary:hover {
     background: transparent;
-    color: var(--amber-phosphor);
+    color: var(--user-fg);
   }
 
   .settings-footer button.secondary {
     flex: 1 1 0;
     background: transparent;
-    color: var(--amber-phosphor);
-    border: 1px solid var(--amber-dim);
+    color: var(--user-fg);
+    border: 1px solid var(--user-dim);
     padding: 10px 14px;
-    font-family: var(--font-term);
+    font-family: var(--font-ui);
     font-size: 0.85em;
     text-transform: uppercase;
     cursor: pointer;
   }
 
   .settings-footer button.secondary:hover {
-    border-color: var(--amber-phosphor);
+    border-color: var(--user-fg);
   }
 
   /* MARKDOWN & CODE BLOCKS - UNIFIED TYPEFACE & SIZE (system output: green) */
   .markdown-body {
-    font-family: var(--font-term) !important;
+    font-family: var(--font-ui) !important;
     font-size: var(--font-size-base) !important;
     line-height: 1.45;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
     text-align: left;
   }
   
@@ -1120,26 +1420,26 @@
    * consistent with all other interactive elements. */
   .markdown-body a {
     text-decoration: underline;
-    color: var(--green-dim);
-    text-decoration-color: var(--green-dim);
+    color: var(--system-dim);
+    text-decoration-color: var(--system-dim);
   }
 
   .markdown-body a:hover {
     text-decoration: underline;
-    color: var(--green-phosphor);
-    text-decoration-color: var(--green-phosphor);
+    color: var(--system-fg);
+    text-decoration-color: var(--system-fg);
   }
 
 
   .markdown-body pre,
   .markdown-body code {
-    font-family: var(--font-term) !important;
+    font-family: var(--font-code) !important;
     font-size: var(--font-size-base) !important;
   }
 
   .markdown-body pre {
-    background: var(--green-panel);
-    border: 1px solid var(--green-dim);
+    background: var(--system-surface);
+    border: 1px solid var(--system-dim);
     border-radius: 2px;
     padding: 12px;
     overflow-x: auto;
@@ -1149,8 +1449,8 @@
 
   .code-block-wrapper {
     margin: 10px 0;
-    border: 1px solid var(--green-dim);
-    background: var(--green-panel);
+    border: 1px solid var(--system-dim);
+    background: var(--system-surface);
     position: relative;
   }
 
@@ -1166,10 +1466,10 @@
     gap: 6px;
     padding: 6px 12px;
     background: var(--bg);
-    border-top: 1px solid var(--green-dim);
+    border-top: 1px solid var(--system-dim);
     cursor: pointer;
     font-size: 0.75em;
-    color: var(--green-phosphor);
+    color: var(--system-fg);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -1192,18 +1492,18 @@
     align-items: center;
     justify-content: center;
     background: transparent;
-    border: 1px solid var(--green-dim);
-    color: var(--green-phosphor);
+    border: 1px solid var(--system-dim);
+    color: var(--system-fg);
     border-radius: 2px;
     padding: 4px 10px;
-    font-family: var(--font-term);
+    font-family: var(--font-code);
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
 
   .code-actions button:hover {
-    background: var(--green-phosphor);
-    color: var(--bg);
+    background: var(--system-fg);
+    color: var(--on-system);
   }
   
   /* DOWNLOAD BUTTON BUSY STATE (while the LLM filename is being generated).
@@ -1225,26 +1525,26 @@
     border-collapse: collapse;
     margin: 8px 0;
     width: 100%;
-    border: 1px solid var(--green-dim);
+    border: 1px solid var(--system-dim);
   }
 
   .markdown-body th,
   .markdown-body td {
-    border: 1px solid var(--green-dim);
+    border: 1px solid var(--system-dim);
     padding: 6px 10px;
     text-align: left;
   }
 
   .markdown-body thead th {
-    background: var(--green-panel);
-    color: var(--green-phosphor);
+    background: var(--system-surface);
+    color: var(--system-fg);
   }
 
   /* PERSISTENT SETTINGS-FORM ERROR (replaces the old ephemeral top popup) */
   .settings-error {
     flex: 0 0 auto;
     padding: 8px 14px 0;
-    background: var(--amber-panel);
+    background: var(--user-surface);
   }
 </style>
 </head>
@@ -1297,6 +1597,16 @@
       <div class="settings-form term-font">
         <div class="settings-header">SYSTEM CONFIGURATION</div>
         <div class="settings-body">
+          <!-- Interface selector: sits first because it changes the whole look.
+               Applied on Save (like every other field), so Cancel keeps the
+               interface the app opened with. -->
+          <div class="field">
+            <label for="field-interfaceStyle">Interface</label>
+            <select id="field-interfaceStyle" class="term-font">
+              <option value="retrogrouch">Retrogrouch</option>
+              <option value="mcmodern">McModern</option>
+            </select>
+          </div>
           <div class="field">
             <label for="field-apiKey">API Key</label>
             <div class="field-copy-wrap">
@@ -1582,7 +1892,13 @@
         splashEl = document.createElement('div');
         splashEl.id = 'emptySplash';
         splashEl.className = 'empty-splash term-font';
-        splashEl.innerHTML = `${ROBOT_SVG}<div class="splash-title">READY FOR INPUT</div>`;
+        /* Both marks are rendered; CSS shows exactly one per interface
+         * (html[data-interface="..."]), so switching interfaces never has to
+         * rebuild the splash. */
+        splashEl.innerHTML =
+          `<span class="splash-art splash-art-retrogrouch">${ROBOT_SVG}</span>` +
+          `<span class="splash-art splash-art-mcmodern">${MC_MODERN_SVG}</span>` +
+          `<div class="splash-title">READY FOR INPUT</div>`;
         conversationWrap.appendChild(splashEl);
       }
     } else if (splashEl) {
@@ -2442,6 +2758,7 @@
     });
 
     const newConfig = {
+      interfaceStyle:  normalizeInterface(document.getElementById('field-interfaceStyle').value),
       apiKey:          document.getElementById('field-apiKey').value.trim(),
       apiHost:         document.getElementById('field-apiHost').value.trim(),
       apiPath:         document.getElementById('field-apiPath').value.trim(),
@@ -2469,6 +2786,7 @@
     clearSettingsError();
     CONFIG = newConfig;
     saveConfig(CONFIG);
+    applyInterface(CONFIG.interfaceStyle);
     settingsScreen.style.display = 'none';
     updateStatusBar();
     promptInput.focus();
@@ -4408,6 +4726,10 @@
 
   /* INITIALIZATION */
   const savedConfig = loadConfig();
+  /* Apply the interface up front (the <head> script already painted it from
+   * localStorage; this re-applies the normalized value from the merged config
+   * and covers the first-run case). */
+  applyInterface(savedConfig ? savedConfig.interfaceStyle : DEFAULT_CONFIG.interfaceStyle);
   if (savedConfig) { 
     CONFIG = savedConfig; 
     updateStatusBar(); 
