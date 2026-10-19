@@ -539,7 +539,19 @@
   }
 
   /* Action buttons: cream slabs on the charcoal field. The two send actions
-   * sit on a slightly warmer plate so the primary controls read first. */
+   * sit on a slightly warmer plate so the primary controls read first.
+   *
+   * The grid tracks MUST match the 48px buttons below. Only the narrow-screen
+   * block used to redefine them (40px / 6px), so at desktop widths the shared
+   * .action-stack rule's 40px tracks sized the grid while the buttons stayed
+   * 48px: the right-hand column overflowed its track, over the slab's edge
+   * and into the reserved pier gutter. Declared here, at the same specificity
+   * as the shared rule but later in the sheet, so it wins on desktop. */
+  html[data-interface="mcmodern"] .action-stack {
+    grid-template-columns: repeat(2, 48px);
+    gap: 10px;
+  }
+
   html[data-interface="mcmodern"] .attach-btn,
   html[data-interface="mcmodern"] .gear-btn,
   html[data-interface="mcmodern"] button.send,
@@ -1751,6 +1763,35 @@
     50%, 100% { opacity: 0.35; }
   }
 
+
+  /* LIST BULLETS ARE SQUARES, NOT DISCS. The same marker is used in both
+   * interfaces (a blocky square reads as phosphor on the CRT and as a crisp
+   * slab on McModern), so it lives in the shared markdown rules rather than
+   * in the interface blocks. Markers sit outside the content box, so the
+   * padding-left both reserves the marker column and keeps wrapped lines
+   * aligned with the first line. */
+  .markdown-body ul {
+    list-style-type: square;
+    list-style-position: outside;
+    padding-left: 1.35em;
+    margin: 0.4em 0;
+  }
+
+  .markdown-body ul li::marker,
+  .markdown-body li::marker {
+    color: var(--system-fg);
+  }
+
+  .markdown-body ol {
+    list-style-position: outside;
+    padding-left: 2em;
+    margin: 0.4em 0;
+  }
+
+  .markdown-body li > ul,
+  .markdown-body li > ol {
+    margin: 0.2em 0;
+  }
 
   .markdown-body table {
     border-collapse: collapse;
