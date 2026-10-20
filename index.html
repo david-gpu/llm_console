@@ -45,11 +45,15 @@
 <!-- CSP EGRESS ALLOWLIST. connect-src is the outbound firewall: scripts in this
      page may only open network connections to the hosts listed below. If you
      change CONFIG.apiHost to a different provider, you MUST add that host
-     here as well, or fetch() will be silently blocked by the browser. -->
+     here as well, or fetch() will be silently blocked by the browser.
+     The McModern interface loads the Orbitron webfont from Google Fonts, hence
+     fonts.googleapis.com in style-src (the @font-face stylesheet) and
+     fonts.gstatic.com in font-src (the actual .woff2 files). -->
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self';
                script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
-               style-src 'self' 'unsafe-inline';
+               style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+               font-src https://fonts.gstatic.com;
                img-src data: blob: https:;
                media-src blob:;
                connect-src https://api.deepinfra.com https://api.tavily.com https://sponsor.ajay.app;">
@@ -59,6 +63,19 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"
         integrity="sha256-8mOwU2ngUPoXXU7LnJNY60JTYC1RApet+zHfSLLxxNU="
         crossorigin="anonymous"></script>
+<!-- McModern typeface. Orbitron is a geometric display face, which matches that
+     interface's architectural vocabulary; Retrogrouch never uses it, so the
+     webfont is only requested by browsers once a glyph needs it. Non-blocking
+     (media="print" then swapped) so a blocked or offline font never delays
+     first paint: Orbitron falls back to the system stack in --font-ui. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap"
+      media="print" onload="this.media='all'">
+<noscript>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap">
+</noscript>
 <script>
   /* 
    * ==========================================================================
@@ -409,7 +426,20 @@
     --overlay-bg:       rgba(24, 24, 24, 0.86);
     --focus-glow:       none;
 
-    --font-ui:          system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    /* SPLASH MATERIAL ACCENTS. The splash robot's glazing and the Santa hat's
+     * cloth are the two saturated hues in the McModern palette; the composer's
+     * action buttons borrow them as borders so the chrome and the mark agree.
+     * The robot markup below repeats these hex values literally (it is an SVG
+     * string that cannot read CSS variables), so change both places together. */
+    --glass:            #66FFFF;   /* robot glazing */
+    --hat-red:          #E02B2B;   /* Santa hat cloth */
+
+    /* Orbitron (Google Fonts, loaded in <head>) is the McModern face. The
+     * system stack stays as the fallback so the UI degrades gracefully when
+     * the font is blocked or the network is offline. Code surfaces keep a real
+     * monospace: Orbitron has no fixed-advance figures, so using it for code
+     * would break column alignment. */
+    --font-ui:          "Orbitron", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --font-code:        ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --font-size-base:   17px;
   }
@@ -564,10 +594,30 @@
     color: #2E2A26;
   }
 
+  /* ACTION BUTTON ACCENTS. The 2x2 cluster at the end of the composer echoes
+   * the splash mark: the top row (send text, generate image) is outlined in
+   * the robot's glazing cyan, the bottom row (attach, settings) in the Santa
+   * hat's cloth red. The top row keeps the 2px stroke it already had (it is
+   * the primary action); the bottom row gets 1px so its denser red does not
+   * shout louder than the cyan above it. */
+  html[data-interface="mcmodern"] button.send,
+  html[data-interface="mcmodern"] button.send-img {
+    border: 2px solid var(--glass);
+  }
+
+  html[data-interface="mcmodern"] .attach-btn,
+  html[data-interface="mcmodern"] .gear-btn {
+    border: 1px solid var(--hat-red);
+  }
+
   html[data-interface="mcmodern"] button.send,
   html[data-interface="mcmodern"] button.send-img {
     background: #F4F1EA;
   }
+
+  /* Disabled and stop states keep their own signal (dim / alert red) so a
+   * busy composer never still reads as "go": those rules sit further down the
+   * sheet with equal specificity and win over the accent borders above. */
 
   html[data-interface="mcmodern"] .attach-btn:disabled,
   html[data-interface="mcmodern"] button.send:disabled,
