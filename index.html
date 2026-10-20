@@ -2690,20 +2690,25 @@
     const extractUrl = `${watchUrl}&cb=${Date.now()}`; /* cache buster: Tavily caches extracts by URL and once served a stale bad one; unknown params are ignored by YouTube */
 
     try {
-      const [rawResults, segments] = await Promise.all([
+      const [extract, segments] = await Promise.all([
         executeTavilyRequest('extract',
-          { urls: [extractUrl], extract_depth: 'advanced' },
+          { urls: [extractUrl], extract_depth: 'basic' },
           signal),
         fetchSponsorBlockSegments(videoId, signal)
       ]);
+      const rawResults = extract.results;
 
       const rawContent = rawResults
         .map(r => (typeof r === 'string' ? r : (r.raw_content || r.content || '')))
         .filter(Boolean)
         .join('\n\n');
       if (!rawContent) {
+        const failure = extract.failed
+          .map(f => `${f.url} (${f.error || 'unknown error'})`)
+          .join('; ');
         logAndThrow(
-          `[YT transcript] Tavily extract returned no extractable content for ${extractUrl}.`,
+          `[YT transcript] Tavily extract returned no extractable content for ${extractUrl}.` +
+          (failure ? ` Reported failures: ${failure}` : ''),
           'Raw result objects:', rawResults);
       }
 
@@ -2741,12 +2746,12 @@
    * swallowed into a tool-error result) so the whole turn tears down cleanly.
    * ==========================================================================
    */
-  async function executeTavilyRequest(endpoint, body, signal) {
+  async function executeTavilyRequest(endpoint, requestBody, signal) {
     if (!CONFIG?.tavilyApiKey) throw new Error('Tavily API key not configured');
     const res = await fetch('https://api.tavily.com/' + endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.tavilyApiKey },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
       signal: signal
     });
     if (!res.ok) {
@@ -2758,19 +2763,39 @@
        * so the JSON error detail it tried to surface was dead code.) */
       logAndThrow(`[Tavily] ${endpoint} failed: ` + await httpErrorDetail(res));
     }
-    return (await res.json()).results || [];
+    /* The body is read ONCE (res.json() cannot be called twice) and split
+     * into successes and per-URL failures. Tavily reports partial extraction
+     * failures with HTTP 200 in `failed_results`, so returning only
+     * `.results` silently made a half-failed fetch look like a clean one. */
+    const payload = await res.json();
+    return { results: payload.results || [], failed: payload.failed_results || [] };
   }
 
   async function executeTavilySearch(query, signal) {
-    return JSON.stringify(await executeTavilyRequest(
+    const { results } = await executeTavilyRequest(
       'search',
       { query: query, max_results: 5, search_depth: 'basic' },
-      signal));
+      signal);
+    return JSON.stringify(results);
   }
 
   async function executeTavilyExtract(urls, signal) {
     const list = Array.isArray(urls) ? urls : [urls];
-    return JSON.stringify(await executeTavilyRequest('extract', { urls: list }, signal));
+    const { results, failed } = await executeTavilyRequest(
+      'extract',
+      { urls: list, extract_depth: 'basic' },
+      signal);
+    /* Partial failure is the normal case worth surfacing: per-URL errors
+     * ride back alongside whatever succeeded so the model can tell "this
+     * page could not be retrieved" apart from "this page had nothing on
+     * the topic". Total failure is thrown rather than returned, so it
+     * reaches toolErrorResult as a real error instead of an empty result. */
+    if (!results.length && failed.length) {
+      logAndThrow(
+        '[fetch_web_page] Tavily extract failed for every URL: ' +
+        failed.map(f => `${f.url} (${f.error || 'unknown error'})`).join('; '));
+    }
+    return JSON.stringify(failed.length ? { results, failed_results: failed } : { results });
   }
 
   /**
