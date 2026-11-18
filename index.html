@@ -232,6 +232,16 @@
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
   }
 
+  /* Effective model for a field ('model' | 'visionModel' | 'imageModel').
+   * An empty/missing stored value means "no explicit choice: track the
+   * shipped default", so pushing a new DEFAULT_CONFIG model reaches every
+   * user who never picked their own. A stored concrete string pins the user
+   * to it, even if it later becomes (or stops being) the default. */
+  function resolvedModel(field) {
+    const v = CONFIG && CONFIG[field];
+    return v ? v : DEFAULT_CONFIG[field];
+  }
+
   /**
    * Parses a "max Tavily calls" value, treating 0 as a valid, deliberate
    * "tools disabled" setting rather than falling back to the default
@@ -1960,7 +1970,9 @@
          (first run) or the stored config (returning users) by loadSettingsIntoForm
          before this screen can ever become visible, so placeholders on pre-filled
          fields would never render. Placeholders are therefore kept ONLY on the two
-         secret fields, which are deliberately left empty and serve as format hints.
+         secret fields, which are deliberately left empty and serve as format hints --
+         plus the three model fields, whose "<default>" placeholder is a display-only
+         hint: leaving one empty saves "" and makes that field track DEFAULT_CONFIG.
          DEFAULT_CONFIG is the single source of truth for every default value. -->
     <div class="settings-screen" id="settingsScreen" style="display:none;">
       <div class="settings-form term-font">
@@ -2021,7 +2033,7 @@
           <div class="field">
             <label for="field-model">Default Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-model" class="term-font">
+              <input type="text" id="field-model" class="term-font" placeholder="<default>">
               <button type="button" class="history-toggle-btn" data-key="model" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-model" style="display:none;"></div>
             </div>
@@ -2029,7 +2041,7 @@
           <div class="field">
             <label for="field-visionModel">Vision Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-visionModel" class="term-font">
+              <input type="text" id="field-visionModel" class="term-font" placeholder="<default>">
               <button type="button" class="history-toggle-btn" data-key="visionModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-visionModel" style="display:none;"></div>
             </div>
@@ -2037,7 +2049,7 @@
           <div class="field">
             <label for="field-imageModel">Image Model</label>
             <div class="field-history-wrap">
-              <input type="text" id="field-imageModel" class="term-font">
+              <input type="text" id="field-imageModel" class="term-font" placeholder="<default>">
               <button type="button" class="history-toggle-btn" data-key="imageModel" title="View saved history"><svg width="12" height="12"><use href="#icon-chevronDown"/></svg></button>
               <div class="history-dropdown" id="history-dropdown-imageModel" style="display:none;"></div>
             </div>
@@ -2900,7 +2912,7 @@
     if (!CONFIG || !CONFIG.apiKey) return 'snippet.txt';
     try {
       const res = await apiFetch(CONFIG.apiPath, {
-        model: CONFIG.model,
+        model: resolvedModel('model'),
         reasoning_effort: 'low',
         service_tier: 'priority',
         temperature: 0.1,
@@ -3161,7 +3173,7 @@
       serviceTier:     document.getElementById('field-serviceTier').value,
       model:           document.getElementById('field-model').value.trim(),
       visionModel:     document.getElementById('field-visionModel').value.trim(),
-      imageModel:      document.getElementById('field-imageModel').value.trim() || DEFAULT_CONFIG.imageModel,
+      imageModel:      document.getElementById('field-imageModel').value.trim(),
       reasoningEffort: document.getElementById('field-reasoningEffort').value,
       imageResolution: document.getElementById('field-imageResolution').value,
       imageQuality:    document.getElementById('field-imageQuality').value,
@@ -3172,7 +3184,8 @@
       extraParams:     {}
     };
 
-    if (!newConfig.apiKey || !newConfig.apiHost || !newConfig.apiPath || !newConfig.model) {
+    if (!newConfig.apiKey || !newConfig.apiHost || !newConfig.apiPath ||
+        !(newConfig.model || DEFAULT_CONFIG.model)) {
       showSettingsError('Please fill in all required fields.');
       return;
     }
@@ -3216,7 +3229,7 @@
     /* The model name doubles as the model-history dropdown toggle; the
      * trailing chevron is the tap affordance. (Built via innerHTML with
      * escapeHtml on the dynamic part; the SVG comes from our own sprite.) */
-    statusModel.innerHTML = escapeHtml((activeModel || CONFIG.model).split('/').pop()) +
+    statusModel.innerHTML = escapeHtml((activeModel || resolvedModel('model')).split('/').pop()) +
       ' ' + useIcon('chevronDown', 12, 12);
   }
 
@@ -3237,7 +3250,8 @@
      * force-included (at the front) so the active choice is always visible
      * even if it was never explicitly saved into the history store. */
     const list = [];
-    if (CONFIG?.model) list.push(CONFIG.model);
+    const currentModel = CONFIG ? resolvedModel('model') : null;
+    if (currentModel) list.push(currentModel);
     getHistory('model').forEach(m => { if (!list.includes(m)) list.push(m); });
 
     if (list.length === 0) {
@@ -3253,14 +3267,14 @@
     list.forEach(m => {
       const itemEl = document.createElement('div');
       itemEl.className = 'history-item term-font';
-      const isCurrent = CONFIG && m === CONFIG.model;
+      const isCurrent = CONFIG && m === currentModel;
       if (isCurrent) itemEl.classList.add('current');
       /* Prompt taxonomy: the active selection is prefixed with '>'. */
       itemEl.textContent = (isCurrent ? '> ' : '  ') + m;
       itemEl.title = m;
       itemEl.onclick = (e) => {
         e.stopPropagation();
-        if (CONFIG && m !== CONFIG.model) {
+        if (CONFIG && m !== currentModel) {
           CONFIG.model = m;
           saveConfig(CONFIG);
           updateStatusBar();
@@ -3972,13 +3986,14 @@
    * index and HTTP detail. */
   async function streamTtsPrepText(rawMarkdown, signal, onProseDelta) {
     const chunks = segmentTextForTts(rawMarkdown, TTS_PREP_SEGMENT_CHARS);
+    const model = resolvedModel('model');
     for (let i = 0; i < chunks.length; i++) {
-      const stage = 'TTS STAGE 1 (markdown-to-prose, model ' + CONFIG.model + ')' +
+      const stage = 'TTS STAGE 1 (markdown-to-prose, model ' + model + ')' +
         (chunks.length > 1 ? ', chunk ' + (i + 1) + '/' + chunks.length + ' (' + chunks[i].length + ' chars in)' : '');
       let res;
       try {
         res = await apiFetch(CONFIG.apiPath, {
-          model: CONFIG.model,
+          model: model,
           reasoning_effort: 'low', /* 'none' makes the model ramble about the instructions instead of following them */
           service_tier: 'priority', /* to reduce latency */
           stream: true,
@@ -4381,10 +4396,11 @@
       : p);
   }
 
-  /* Picks the model for a chat turn: image payloads route to the vision model. */
+  /* Picks the model for a chat turn: image payloads route to the vision model.
+   * Both go through resolvedModel, so an unset field tracks the shipped default. */
   function pickChatModel(fullPayload) {
     const hasImage = Array.isArray(fullPayload) && fullPayload.some(i => i && i.type === 'image_url');
-    return (hasImage && CONFIG.visionModel) ? CONFIG.visionModel : CONFIG.model;
+    return (hasImage && resolvedModel('visionModel')) ? resolvedModel('visionModel') : resolvedModel('model');
   }
 
   /* ==========================================================================
@@ -5024,7 +5040,7 @@
   async function executeImageRequest(promptText, contentEl, signal, turnId) {
     /* DEFAULT_CONFIG is the single source of truth for image-generation
      * defaults; the fallbacks below only cover a strangely partial CONFIG. */
-    const targetModel = CONFIG.imageModel || DEFAULT_CONFIG.imageModel;
+    const targetModel = resolvedModel('imageModel');
     updateStatusBar(targetModel);
 
     /* One retry closure for every error/abort path below (image turns never
